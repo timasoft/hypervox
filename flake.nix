@@ -1,33 +1,41 @@
 {
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
-    naersk.url  = "github:nix-community/naersk";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
-  outputs = { self, nixpkgs, naersk, flake-utils, ... }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, ... }:
     flake-utils.lib.eachDefaultSystem (system:
     let
-      pkgs = import nixpkgs { inherit system; };
-      naerskLib = pkgs.callPackage naersk {};
-      rustSrc = pkgs.rust.packages.stable.rustPlatform.rustLibSrc;
+      pkgs = import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; };
 
-      ndvoxgcalc = naerskLib.buildPackage {
-        src = ./.;
-        buildInputs = with pkgs; [ ];
-        nativeBuildInputs = [ pkgs.pkg-config ];
+      rust = pkgs.rust-bin.stable.latest.default.override {
+        extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
+        targets    = [ "wasm32-unknown-unknown" ];
       };
     in {
-      packages.default = ndvoxgcalc;
+      packages.ndvoxgcalc = pkgs.stdenv.mkDerivation {
+        pname = "ndvoxgcalc";
+        version = "0.1.0";
+        src = ./.;
+        nativeBuildInputs = [ rust pkgs.trunk pkgs.binaryen pkgs.pkg-config ];
 
-      defaultPackage = ndvoxgcalc;
+        buildPhase = "trunk build --release --public-url ./";
+        installPhase = ''
+          mkdir -p $out
+          cp -r dist/* $out/
+        '';
+      };
+
+      defaultPackage = self.packages.${system}.ndvoxgcalc;
 
       devShells.default = pkgs.mkShell {
-        buildInputs = with pkgs; [
-          fish
-          cargo rustc rustfmt clippy rust-analyzer
+        buildInputs = [
+          pkgs.fish
+          rust
+          pkgs.trunk pkgs.wasm-bindgen-cli pkgs.pkg-config
         ];
-        nativeBuildInputs = [ pkgs.pkg-config ];
 
         shellHook = ''
           if [ -z "$FISH_VERSION" ] && [ -z "$NO_AUTO_FISH" ]; then
@@ -35,7 +43,7 @@
           fi
         '';
 
-        env.RUST_SRC_PATH = "${rustSrc}";
+        env.RUST_SRC_PATH = "${rust}/lib/rustlib/src/rust/library";
       };
     });
 }

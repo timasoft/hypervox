@@ -3,4 +3,23 @@ name = "ndvoxgcalc"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+debug = false
+overflow-checks = false
+
 [dependencies]
+bevy = { version = "0.18.1", default-features = false, features = [
+    "bevy_pbr",
+    "bevy_ui_render",
+    "default_font",
+    "webgl2",
+    "zstd_rust",
+    "bevy_log",
+    "x11",
+] }
+rand = "0.10.1"
+getrandom = { version = "0.4.2", features = ["wasm_js"] }
