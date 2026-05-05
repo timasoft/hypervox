@@ -8,6 +8,7 @@ use bevy::{
     render::render_resource::PrimitiveTopology,
     window::{PresentMode, WindowMode, WindowResolution},
 };
+use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use rand::RngExt;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -52,6 +53,16 @@ struct CameraRotation {
     speed: f32,
 }
 
+#[derive(Resource, PartialEq)]
+enum CameraMode {
+    AutoOrbit,
+    Manual,
+}
+
+#[derive(Component)]
+struct CameraModeButton;
+#[derive(Component)]
+struct CameraModeButtonText;
 #[derive(Component)]
 struct FpsText;
 #[derive(Component)]
@@ -114,10 +125,10 @@ const FACE_DEFS: [(Vec3Arr, CornerArr, IVec3Arr); 6] = [
     (
         [0.0, -1.0, 0.0],
         [
-            [-0.5, -0.5, 0.5],
-            [0.5, -0.5, 0.5],
-            [0.5, -0.5, -0.5],
             [-0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5],
+            [0.5, -0.5, 0.5],
+            [-0.5, -0.5, 0.5],
         ],
         [0, -1, 0],
     ),
@@ -194,11 +205,13 @@ fn main() {
         .insert_resource(GridConfig { size: 64 })
         .insert_resource(RegenerateEveryFrame { enabled: false })
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
+        .add_plugins(PanOrbitCameraPlugin)
         .add_systems(Startup, (setup, setup_fps_text, setup_grid_ui))
         .add_systems(
             Update,
             (
                 rotate_camera,
+                toggle_camera_mode,
                 update_fps_text,
                 regenerate_voxels,
                 update_grid_ui,
@@ -218,6 +231,7 @@ fn setup(
     let camera_height = grid_config.camera_height();
 
     // 1. Spawn camera and store Entity
+    // PanOrbitCamera disabled initially (starts in AutoOrbit mode)
     let cam_entity = commands
         .spawn((
             Camera3d::default(),
@@ -229,6 +243,12 @@ fn setup(
             .looking_at(center, Vec3::Y),
             Exposure { ev100: 0.0 },
             Tonemapping::None,
+            PanOrbitCamera {
+                enabled: false,
+                focus: center,
+                target_focus: center,
+                ..default()
+            },
         ))
         .id();
 
@@ -284,6 +304,7 @@ fn setup(
         angle: 0.0,
         speed: 0.5,
     });
+    commands.insert_resource(CameraMode::AutoOrbit);
 
     setup_ui(commands);
 }
@@ -333,7 +354,7 @@ fn setup_ui(mut commands: Commands) {
                 .spawn((
                     Button,
                     Node {
-                        width: Val::Px(160.0),
+                        width: Val::Px(180.0),
                         height: Val::Px(40.0),
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
@@ -360,11 +381,12 @@ fn setup_ui(mut commands: Commands) {
                 .spawn((
                     Button,
                     Node {
-                        width: Val::Px(160.0),
+                        width: Val::Px(180.0),
                         height: Val::Px(40.0),
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         border: UiRect::all(Val::Px(2.0)),
+                        margin: UiRect::bottom(Val::Px(8.0)),
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 0.8)),
@@ -373,13 +395,40 @@ fn setup_ui(mut commands: Commands) {
                 ))
                 .with_children(|parent| {
                     parent.spawn((
-                        Text::new("Auto: OFF"),
+                        Text::new("Auto Regen: OFF"),
                         TextFont {
                             font_size: 18.0,
                             ..default()
                         },
                         TextColor(Color::srgb(0.95, 0.95, 0.95)),
                         RegenerateEveryFrameText,
+                    ));
+                });
+
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: Val::Px(180.0),
+                        height: Val::Px(40.0),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 0.8)),
+                    BorderColor::all(Color::srgb(0.5, 0.5, 0.5)),
+                    CameraModeButton,
+                ))
+                .with_children(|parent| {
+                    parent.spawn((
+                        Text::new("Camera: Auto"),
+                        TextFont {
+                            font_size: 18.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.95, 0.95)),
+                        CameraModeButtonText,
                     ));
                 });
         });
@@ -640,7 +689,12 @@ fn rotate_camera(
     mut rotation: ResMut<CameraRotation>,
     mut query_camera: Query<&mut Transform, With<Camera3d>>,
     grid_config: Res<GridConfig>,
+    camera_mode: Res<CameraMode>,
 ) {
+    if *camera_mode != CameraMode::AutoOrbit {
+        return;
+    }
+
     rotation.angle += time.delta_secs() * rotation.speed;
 
     let center = grid_config.center();
@@ -654,6 +708,43 @@ fn rotate_camera(
             center.z + radius * rotation.angle.sin(),
         );
         t.look_at(center, Vec3::Y);
+    }
+}
+
+fn toggle_camera_mode(
+    mut query: Query<&Interaction, (Changed<Interaction>, With<CameraModeButton>)>,
+    mut camera_mode: ResMut<CameraMode>,
+    mut query_text: Query<&mut Text, With<CameraModeButtonText>>,
+    mut query_cam: Query<&mut PanOrbitCamera>,
+    grid_config: Res<GridConfig>,
+) {
+    for interaction in &mut query {
+        if *interaction == Interaction::Pressed {
+            let center = grid_config.center();
+            *camera_mode = match *camera_mode {
+                CameraMode::AutoOrbit => {
+                    for mut poc in &mut query_cam {
+                        poc.enabled = true;
+                        poc.focus = center;
+                        poc.target_focus = center;
+                    }
+                    CameraMode::Manual
+                }
+                CameraMode::Manual => {
+                    for mut poc in &mut query_cam {
+                        poc.enabled = false;
+                    }
+                    CameraMode::AutoOrbit
+                }
+            };
+
+            if let Ok(mut text) = query_text.single_mut() {
+                text.0 = match *camera_mode {
+                    CameraMode::AutoOrbit => "Camera: Auto".into(),
+                    CameraMode::Manual => "Camera: Manual".into(),
+                };
+            }
+        }
     }
 }
 
@@ -750,6 +841,7 @@ fn setup_grid_ui(mut commands: Commands) {
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_scene(
     mut commands: Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
@@ -757,6 +849,8 @@ fn rebuild_scene(
     grid_config: &GridConfig,
     entities: &SceneEntities,
     rotation: &CameraRotation,
+    camera_mode: &CameraMode,
+    mut query_cam: Query<&mut Transform>,
 ) {
     let (grid, voxel_count) = generate_voxels(grid_config);
     let mut mesh = Mesh::new(
@@ -793,18 +887,35 @@ fn rebuild_scene(
         })));
 
     let center = grid_config.center();
-    let radius = grid_config.camera_radius();
-    let height = grid_config.camera_height();
-    let angle = rotation.angle;
 
-    commands.entity(entities.camera).insert(
-        Transform::from_xyz(
-            center.x + radius * angle.cos(),
-            center.y + height,
-            center.z + radius * angle.sin(),
-        )
-        .looking_at(center, Vec3::Y),
-    );
+    match camera_mode {
+        CameraMode::AutoOrbit => {
+            let radius = grid_config.camera_radius();
+            let height = grid_config.camera_height();
+            let angle = rotation.angle;
+
+            commands.entity(entities.camera).insert(
+                Transform::from_xyz(
+                    center.x + radius * angle.cos(),
+                    center.y + height,
+                    center.z + radius * angle.sin(),
+                )
+                .looking_at(center, Vec3::Y),
+            );
+        }
+        CameraMode::Manual => {
+            // Manual: update camera focus to look at new center
+            commands.entity(entities.camera).insert(PanOrbitCamera {
+                focus: center,
+                target_focus: center,
+                ..default()
+            });
+            // Immediately update camera transform to look at new center
+            if let Ok(mut transform) = query_cam.get_mut(entities.camera) {
+                transform.look_at(center, Vec3::Y);
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -818,6 +929,8 @@ fn update_grid_ui(
     mut text_query: Query<&mut Text, With<GridSizeText>>,
     entities: Res<SceneEntities>,
     rotation: Res<CameraRotation>,
+    camera_mode: Res<CameraMode>,
+    query_cam: Query<&mut Transform>,
 ) {
     let mut changed = false;
 
@@ -858,6 +971,7 @@ fn update_grid_ui(
         } else {
             warn!("GridSizeText entity not found or duplicated, UI may be out of sync");
         }
+
         rebuild_scene(
             commands.reborrow(),
             &mut meshes,
@@ -865,6 +979,8 @@ fn update_grid_ui(
             &grid_config,
             &entities,
             &rotation,
+            &camera_mode,
+            query_cam,
         );
     }
 }
@@ -883,6 +999,8 @@ fn regenerate_voxels(
     grid_config: Res<GridConfig>,
     entities: Res<SceneEntities>,
     rotation: Res<CameraRotation>,
+    camera_mode: Res<CameraMode>,
+    query_cam: Query<&mut Transform>,
     mut query_auto_text: Query<&mut Text, With<RegenerateEveryFrameText>>,
 ) {
     if let Ok(interaction) = query_auto_button.single()
@@ -891,9 +1009,9 @@ fn regenerate_voxels(
         auto_regen.enabled = !auto_regen.enabled;
         if let Ok(mut text) = query_auto_text.single_mut() {
             text.0 = if auto_regen.enabled {
-                "Auto: ON"
+                "Auto Regen: ON"
             } else {
-                "Auto: OFF"
+                "Auto Regen: OFF"
             }
             .into();
         }
@@ -915,5 +1033,7 @@ fn regenerate_voxels(
         &grid_config,
         &entities,
         &rotation,
+        &camera_mode,
+        query_cam,
     );
 }
