@@ -16,10 +16,31 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "bevy_pbr",
     "bevy_ui_render",
     "default_font",
-    "webgl2",
-    "zstd_rust",
     "bevy_log",
-    "x11",
 ] }
 rand = "0.10.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bevy = { version = "0.18.1", default-features = false, features = [
+    "bevy_pbr",
+    "bevy_ui_render",
+    "default_font",
+    "bevy_log",
+    "x11",
+    "wayland",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { version = "0.18.1", default-features = false, features = [
+    "bevy_pbr",
+    "bevy_ui_render",
+    "default_font",
+    "bevy_log",
+    "bevy_winit",
+    "webgl2",
+] }
 getrandom = { version = "0.4.2", features = ["wasm_js"] }
+wasm-bindgen = "=0.2.117"
+js-sys = "=0.3.94"
+web-sys = "=0.3.94"
+wasm-bindgen-futures = "=0.4.67"
