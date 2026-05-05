@@ -10,6 +10,9 @@ use bevy::{
 };
 use rand::RngExt;
 
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
+
 type Vec3Arr = [f32; 3];
 type IVec3Arr = [i32; 3];
 type CornerArr = [Vec3Arr; 4];
@@ -23,33 +26,17 @@ struct GridConfig {
 
 impl GridConfig {
     #[inline]
-    fn size_u32(&self) -> u32 {
-        self.size
-    }
-    #[inline]
-    fn size_f32(&self) -> f32 {
-        self.size as f32
-    }
-    #[inline]
-    fn size_i32(&self) -> i32 {
-        self.size as i32
-    }
-    #[inline]
-    fn size_usize(&self) -> usize {
-        self.size as usize
-    }
-    #[inline]
     fn center(&self) -> Vec3 {
-        let f = self.size_f32();
+        let f = self.size as f32;
         Vec3::splat(f / 2.0 - 0.5)
     }
     #[inline]
     fn camera_radius(&self) -> f32 {
-        self.size_f32() * 1.5
+        self.size as f32 * 1.5
     }
     #[inline]
     fn camera_height(&self) -> f32 {
-        self.size_f32() * 0.8
+        self.size as f32 * 0.8
     }
 }
 
@@ -87,6 +74,7 @@ struct GridMinusButton;
 struct GridPlusButton;
 
 type Grid = Vec<u32>;
+type MeshData = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<u32>);
 
 const FACE_DEFS: [(Vec3Arr, CornerArr, IVec3Arr); 6] = [
     // +X face
@@ -250,12 +238,23 @@ fn setup(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
+
+    #[cfg(target_arch = "wasm32")]
     build_batched_mesh_with_global_corner_ambient_occlusion(
         &mut mesh,
         &grid,
         &grid_config,
         voxel_count,
     );
+
+    #[cfg(not(target_arch = "wasm32"))]
+    build_batched_mesh_with_global_corner_ambient_occlusion_par(
+        &mut mesh,
+        &grid,
+        &grid_config,
+        voxel_count,
+    );
+
     let mesh_handle = meshes.add(mesh);
 
     let material_handle = materials.add(StandardMaterial {
@@ -291,9 +290,9 @@ fn setup(
 
 fn generate_voxels(grid_config: &GridConfig) -> (Grid, usize) {
     let mut rng = rand::rng();
-    let size = grid_config.size_u32();
-    let size_f = grid_config.size_f32();
-    let size_usize = grid_config.size_usize();
+    let size = grid_config.size;
+    let size_f = grid_config.size as f32;
+    let size_usize = grid_config.size as usize;
 
     // 0 = empty, 1..=0xFFFFFF+1 = voxel with encoded color
     let mut grid = vec![0u32; size_usize.pow(3)];
@@ -431,24 +430,22 @@ fn update_fps_text(diagnostics: Res<DiagnosticsStore>, mut query: Query<&mut Tex
     }
 }
 
-fn build_batched_mesh_with_global_corner_ambient_occlusion(
-    mesh: &mut Mesh,
+fn process_x_range(
+    x_start: u32,
+    x_end: u32,
     grid: &Grid,
-    grid_config: &GridConfig,
+    size: u32,
     voxel_count: usize,
-) {
-    info!("voxel_count: {}", voxel_count);
-
-    let size = grid_config.size_u32();
-    let size_usize = grid_config.size_usize();
-    let size_i32 = grid_config.size_i32();
+) -> MeshData {
+    let size_i32 = size as i32;
+    let size_usize = size as usize;
 
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(voxel_count * 30);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(voxel_count * 30);
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(voxel_count * 30);
     let mut indices: Vec<u32> = Vec::with_capacity(voxel_count * 72);
 
-    for x in 0..size {
+    for x in x_start..x_end {
         for y in 0..size {
             for z in 0..size {
                 let idx = grid_index(x as usize, y as usize, z as usize, size_usize);
@@ -570,6 +567,66 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion(
                 }
             }
         }
+    }
+
+    (positions, normals, colors, indices)
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn build_batched_mesh_with_global_corner_ambient_occlusion(
+    mesh: &mut Mesh,
+    grid: &Grid,
+    grid_config: &GridConfig,
+    voxel_count: usize,
+) {
+    info!("voxel_count: {}", voxel_count);
+
+    let size = grid_config.size;
+
+    let (positions, normals, colors, indices) = process_x_range(0, size, grid, size, voxel_count);
+
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
+    mesh: &mut Mesh,
+    grid: &Grid,
+    grid_config: &GridConfig,
+    voxel_count: usize,
+) {
+    info!("voxel_count: {}", voxel_count);
+
+    let size = grid_config.size;
+
+    let chunk_count = num_cpus::get();
+    let chunk_size = (size as usize).div_ceil(chunk_count);
+    let voxel_count_per_chunk = voxel_count.div_ceil(chunk_count);
+    let results: Vec<_> = (0..size)
+        .collect::<Vec<_>>()
+        .par_chunks(chunk_size)
+        .map(|x_range| {
+            let x_start = x_range[0];
+            let x_end = x_range[x_range.len() - 1] + 1;
+            process_x_range(x_start, x_end, grid, size, voxel_count_per_chunk)
+        })
+        .collect();
+
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(voxel_count * 30);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(voxel_count * 30);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(voxel_count * 30);
+    let mut indices: Vec<u32> = Vec::with_capacity(voxel_count * 72);
+
+    let mut vertex_offset = 0u32;
+    for (pos, norm, col, ind) in results {
+        positions.extend(pos);
+        normals.extend(norm);
+        colors.extend(col);
+        indices.extend(ind.into_iter().map(|i| i + vertex_offset));
+        vertex_offset = positions.len() as u32;
     }
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
@@ -706,7 +763,17 @@ fn rebuild_scene(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
+
+    #[cfg(target_arch = "wasm32")]
     build_batched_mesh_with_global_corner_ambient_occlusion(
+        &mut mesh,
+        &grid,
+        grid_config,
+        voxel_count,
+    );
+
+    #[cfg(not(target_arch = "wasm32"))]
+    build_batched_mesh_with_global_corner_ambient_occlusion_par(
         &mut mesh,
         &grid,
         grid_config,
