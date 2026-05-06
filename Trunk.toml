@@ -6,3 +6,14 @@ dist = "dist"
 addresses = [ "0.0.0.0" ]
 port = 8080
 open = true
+
+[watch]
+watch = ["src", "Cargo.toml", "index.html"]
+
+ignore = [
+  "dist",
+  "target",
+  "result",
+  "flake.nix",
+  "flake.lock",
+]
