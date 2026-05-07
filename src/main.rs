@@ -8,11 +8,13 @@ use bevy::{
     render::render_resource::PrimitiveTopology,
     window::{PresentMode, WindowMode, WindowResolution},
 };
+use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
-use rand::RngExt;
 
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+
+mod math;
 
 type Vec3Arr = [f32; 3];
 type IVec3Arr = [i32; 3];
@@ -59,30 +61,32 @@ enum CameraMode {
     Manual,
 }
 
-#[derive(Component)]
-struct CameraModeButton;
-#[derive(Component)]
-struct CameraModeButtonText;
-#[derive(Component)]
-struct FpsText;
-#[derive(Component)]
-struct VoxelRoot;
-#[derive(Component)]
-struct RegenerateButton;
-#[derive(Component)]
-struct RegenerateEveryFrameButton;
-#[derive(Component)]
-struct RegenerateEveryFrameText;
 #[derive(Resource)]
 struct RegenerateEveryFrame {
     enabled: bool,
 }
-#[derive(Component)]
-struct GridSizeText;
-#[derive(Component)]
-struct GridMinusButton;
-#[derive(Component)]
-struct GridPlusButton;
+
+#[derive(Resource)]
+struct ExpressionConfig {
+    expr: String,
+}
+
+impl Default for ExpressionConfig {
+    fn default() -> Self {
+        Self {
+            expr: "x^2 + z * y - 64.0".into(),
+        }
+    }
+}
+
+#[derive(Resource)]
+struct VoxelCount(pub usize);
+
+#[derive(Resource, Default)]
+struct ExpressionStatus {
+    is_valid: bool,
+    error: Option<String>,
+}
 
 type Grid = Vec<u32>;
 type MeshData = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<u32>);
@@ -188,14 +192,29 @@ fn is_occupied(
     grid[grid_index(x as usize, y as usize, z as usize, grid_size_usize)] != 0
 }
 
+fn validate_expression(expr: &str) -> Result<(), String> {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return Err("Expression cannot be empty".into());
+    }
+
+    if trimmed.contains("**") {
+        return Err("Use ^ for power (e.g. x^2), not **. Example: x^2 + y*z - 64".into());
+    }
+
+    use evalexpr::DefaultNumericTypes;
+    evalexpr::build_operator_tree::<DefaultNumericTypes>(trimmed)
+        .map(|_| ())
+        .map_err(|e| format!("Parse error: {e}"))
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "NDVoxGCalc".into(),
                 mode: WindowMode::BorderlessFullscreen(MonitorSelection::Current),
-                prevent_default_event_handling: true,
-                resolution: WindowResolution::default().with_scale_factor_override(1.0),
+                resolution: WindowResolution::default(),
                 present_mode: PresentMode::Fifo,
                 ..default()
             }),
@@ -203,20 +222,15 @@ fn main() {
         }))
         .insert_resource(ClearColor(Color::WHITE))
         .insert_resource(GridConfig { size: 64 })
+        .insert_resource(ExpressionConfig::default())
+        .insert_resource(ExpressionStatus::default())
         .insert_resource(RegenerateEveryFrame { enabled: false })
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(PanOrbitCameraPlugin)
-        .add_systems(Startup, (setup, setup_fps_text, setup_grid_ui))
-        .add_systems(
-            Update,
-            (
-                rotate_camera,
-                toggle_camera_mode,
-                update_fps_text,
-                regenerate_voxels,
-                update_grid_ui,
-            ),
-        )
+        .add_plugins(EguiPlugin::default())
+        .add_systems(Startup, setup)
+        .add_systems(Update, (rotate_camera, update_ui_scale_from_browser))
+        .add_systems(EguiPrimaryContextPass, egui_ui_system)
         .run();
 }
 
@@ -225,13 +239,12 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     grid_config: Res<GridConfig>,
+    mut expr_status: ResMut<ExpressionStatus>,
 ) {
     let center = grid_config.center();
     let camera_radius = grid_config.camera_radius();
     let camera_height = grid_config.camera_height();
 
-    // 1. Spawn camera and store Entity
-    // PanOrbitCamera disabled initially (starts in AutoOrbit mode)
     let cam_entity = commands
         .spawn((
             Camera3d::default(),
@@ -252,8 +265,8 @@ fn setup(
         ))
         .id();
 
-    // 2. Generate voxels and mesh
-    let (grid, voxel_count) = generate_voxels(&grid_config);
+    let expr_config = ExpressionConfig::default();
+    let (grid, voxel_count) = generate_voxels(&grid_config, &expr_config, &mut expr_status);
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
@@ -286,16 +299,10 @@ fn setup(
         ..default()
     });
 
-    // 3. Spawn mesh and store Entity
     let mesh_entity = commands
-        .spawn((
-            Mesh3d(mesh_handle),
-            MeshMaterial3d(material_handle),
-            VoxelRoot,
-        ))
+        .spawn((Mesh3d(mesh_handle), MeshMaterial3d(material_handle)))
         .id();
 
-    // 4. Store references and initialize rotation
     commands.insert_resource(SceneEntities {
         camera: cam_entity,
         voxel_mesh: mesh_entity,
@@ -305,177 +312,39 @@ fn setup(
         speed: 0.5,
     });
     commands.insert_resource(CameraMode::AutoOrbit);
-
-    setup_ui(commands);
+    commands.insert_resource(VoxelCount(voxel_count));
 }
 
-fn generate_voxels(grid_config: &GridConfig) -> (Grid, usize) {
-    let mut rng = rand::rng();
-    let size = grid_config.size;
-    let size_f = grid_config.size as f32;
+fn generate_voxels(
+    grid_config: &GridConfig,
+    expr_config: &ExpressionConfig,
+    expr_status: &mut ExpressionStatus,
+) -> (Grid, usize) {
     let size_usize = grid_config.size as usize;
+    let half_extent = (grid_config.size as f64) / 2.0;
+    let expr = &expr_config.expr;
 
-    // 0 = empty, 1..=0xFFFFFF+1 = voxel with encoded color
-    let mut grid = vec![0u32; size_usize.pow(3)];
-    let mut voxel_count = 0;
-
-    for x in 0..size {
-        for y in 0..size {
-            for z in 0..size {
-                let chance = ((size - y) as f32 / size_f).powi(4);
-                if rng.random::<f32>() < chance {
-                    // Generate 24-bit color and add +1 so 0 remains empty
-                    let color_val = (rng.random::<u32>() & 0xFFFFFF) + 1;
-                    let idx = grid_index(x as usize, y as usize, z as usize, size_usize);
-                    grid[idx] = color_val;
-                    voxel_count += 1;
-                }
-            }
-        }
+    if let Err(e) = validate_expression(expr) {
+        expr_status.is_valid = false;
+        expr_status.error = Some(e);
+        return (vec![0; size_usize.pow(3)], 0);
     }
+    expr_status.is_valid = true;
+    expr_status.error = None;
 
-    (grid, voxel_count)
-}
+    let base_color = rand::random::<u32>() & 0xFFFFFF;
 
-fn setup_ui(mut commands: Commands) {
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(12.0),
-                left: Val::Px(12.0),
-                flex_direction: FlexDirection::Column,
-                ..default()
-            },
-            BackgroundColor(Color::NONE),
-        ))
-        .with_children(|parent| {
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(180.0),
-                        height: Val::Px(40.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        border: UiRect::all(Val::Px(2.0)),
-                        margin: UiRect::bottom(Val::Px(8.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 0.8)),
-                    BorderColor::all(Color::srgb(0.5, 0.5, 0.5)),
-                    RegenerateButton,
-                ))
-                .with_children(|parent| {
-                    parent.spawn((
-                        Text::new("Regenerate"),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-                    ));
-                });
-
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(180.0),
-                        height: Val::Px(40.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        border: UiRect::all(Val::Px(2.0)),
-                        margin: UiRect::bottom(Val::Px(8.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 0.8)),
-                    BorderColor::all(Color::srgb(0.5, 0.5, 0.5)),
-                    RegenerateEveryFrameButton,
-                ))
-                .with_children(|parent| {
-                    parent.spawn((
-                        Text::new("Auto Regen: OFF"),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-                        RegenerateEveryFrameText,
-                    ));
-                });
-
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(180.0),
-                        height: Val::Px(40.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        border: UiRect::all(Val::Px(2.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 0.8)),
-                    BorderColor::all(Color::srgb(0.5, 0.5, 0.5)),
-                    CameraModeButton,
-                ))
-                .with_children(|parent| {
-                    parent.spawn((
-                        Text::new("Camera: Auto"),
-                        TextFont {
-                            font_size: 18.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-                        CameraModeButtonText,
-                    ));
-                });
-        });
-}
-
-fn setup_fps_text(mut commands: Commands) {
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(12.0),
-                left: Val::Px(12.0),
-                padding: UiRect::all(Val::Px(8.0)),
-                border: UiRect::all(Val::Px(1.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
-            BorderColor::all(Color::srgb(0.3, 0.3, 0.3)),
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("FPS: --"),
-                TextFont {
-                    font_size: 20.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.95, 0.95, 0.95)),
-                FpsText,
-            ));
-        });
-}
-
-fn update_fps_text(diagnostics: Res<DiagnosticsStore>, mut query: Query<&mut Text, With<FpsText>>) {
-    let Ok(mut text) = query.single_mut() else {
-        warn!("FPS text entity not found or multiple entities with FpsText component");
-        return;
-    };
-
-    let fps = diagnostics
-        .get(&FrameTimeDiagnosticsPlugin::FPS)
-        .and_then(|d| d.smoothed())
-        .map(|v| v.round() as u32)
-        .unwrap_or(0);
-
-    let new_value = format!("FPS: {fps}");
-    if **text != new_value {
-        text.0 = new_value;
+    match math::generate_voxel_grid(size_usize, expr, base_color, half_extent) {
+        Ok(grid) => {
+            let voxel_count = grid.iter().filter(|&&v| v != 0).count();
+            (grid, voxel_count)
+        }
+        Err(e) => {
+            error!("Error evaluating expression: {}", e);
+            expr_status.is_valid = false;
+            expr_status.error = Some(format!("Eval error: {e}"));
+            (vec![0; size_usize.pow(3)], 0)
+        }
     }
 }
 
@@ -500,13 +369,12 @@ fn process_x_range(
                 let idx = grid_index(x as usize, y as usize, z as usize, size_usize);
                 let voxel_val = grid[idx];
                 if voxel_val == 0 {
-                    continue; // empty voxel
+                    continue;
                 }
 
                 let base_linear = decode_color(voxel_val);
                 let offset = Vec3::new(x as f32, y as f32, z as f32);
 
-                // Calculate AO for 8 voxel corners
                 let mut corner_ambient_occlusion = [1.0f32; 8];
                 for cx_off in 0..2 {
                     for cy_off in 0..2 {
@@ -532,14 +400,13 @@ fn process_x_range(
                     }
                 }
 
-                // Process 6 faces
                 for (normal, corners, neighbor_offset) in FACE_DEFS {
                     let nx = x as i32 + neighbor_offset[0];
                     let ny = y as i32 + neighbor_offset[1];
                     let nz = z as i32 + neighbor_offset[2];
 
                     if is_occupied(grid, nx, ny, nz, size_i32, size_usize) {
-                        continue; // face is occluded by neighbor
+                        continue;
                     }
 
                     let mut ambient_occlusion_sum = 0.0;
@@ -585,12 +452,10 @@ fn process_x_range(
 
                     let start_idx = positions.len() as u32;
 
-                    // Face center vertex
                     positions.push(center_pos);
                     normals.push(normal);
                     colors.push(center_color);
 
-                    // 4 corner vertices
                     for (i, &corner) in corners.iter().enumerate() {
                         let [cx, cy, cz] = corner;
                         positions.push([cx + offset.x, cy + offset.y, cz + offset.z]);
@@ -598,7 +463,6 @@ fn process_x_range(
                         colors.push(corner_colors[i]);
                     }
 
-                    // 4 triangles (fan from center)
                     indices.extend_from_slice(&[
                         start_idx,
                         start_idx + 1,
@@ -629,11 +493,8 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion(
     voxel_count: usize,
 ) {
     info!("voxel_count: {}", voxel_count);
-
     let size = grid_config.size;
-
     let (positions, normals, colors, indices) = process_x_range(0, size, grid, size, voxel_count);
-
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
@@ -648,9 +509,7 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
     voxel_count: usize,
 ) {
     info!("voxel_count: {}", voxel_count);
-
     let size = grid_config.size;
-
     let chunk_count = num_cpus::get();
     let chunk_size = (size as usize).div_ceil(chunk_count);
     let voxel_count_per_chunk = voxel_count.div_ceil(chunk_count);
@@ -694,13 +553,10 @@ fn rotate_camera(
     if *camera_mode != CameraMode::AutoOrbit {
         return;
     }
-
     rotation.angle += time.delta_secs() * rotation.speed;
-
     let center = grid_config.center();
     let radius = grid_config.camera_radius();
     let height = grid_config.camera_height();
-
     for mut t in query_camera.iter_mut() {
         t.translation = Vec3::new(
             center.x + radius * rotation.angle.cos(),
@@ -711,329 +567,231 @@ fn rotate_camera(
     }
 }
 
-fn toggle_camera_mode(
-    mut query: Query<&Interaction, (Changed<Interaction>, With<CameraModeButton>)>,
-    mut camera_mode: ResMut<CameraMode>,
-    mut query_text: Query<&mut Text, With<CameraModeButtonText>>,
-    mut query_cam: Query<&mut PanOrbitCamera>,
-    grid_config: Res<GridConfig>,
-) {
-    for interaction in &mut query {
-        if *interaction == Interaction::Pressed {
-            let center = grid_config.center();
-            *camera_mode = match *camera_mode {
-                CameraMode::AutoOrbit => {
-                    for mut poc in &mut query_cam {
-                        poc.enabled = true;
-                        poc.focus = center;
-                        poc.target_focus = center;
-                    }
-                    CameraMode::Manual
-                }
-                CameraMode::Manual => {
-                    for mut poc in &mut query_cam {
-                        poc.enabled = false;
-                    }
-                    CameraMode::AutoOrbit
-                }
-            };
+#[cfg(target_arch = "wasm32")]
+fn update_ui_scale_from_browser(mut egui_contexts: EguiContexts) {
+    if let Some(window) = web_sys::window() {
+        let scale = window.device_pixel_ratio() as f32;
+        if let Ok(ctx) = egui_contexts.ctx_mut() {
+            ctx.set_pixels_per_point(scale);
+        }
+    }
+}
 
-            if let Ok(mut text) = query_text.single_mut() {
-                text.0 = match *camera_mode {
-                    CameraMode::AutoOrbit => "Camera: Auto".into(),
-                    CameraMode::Manual => "Camera: Manual".into(),
+#[cfg(not(target_arch = "wasm32"))]
+fn update_ui_scale_from_browser() {}
+
+#[allow(clippy::too_many_arguments)]
+fn egui_ui_system(
+    mut commands: Commands,
+    mut egui_contexts: EguiContexts,
+    diagnostics: Res<DiagnosticsStore>,
+    mut grid_config: ResMut<GridConfig>,
+    mut camera_mode: ResMut<CameraMode>,
+    mut query_cam: Query<&mut PanOrbitCamera>,
+    mut auto_regen: ResMut<RegenerateEveryFrame>,
+    mut regenerate_request: Local<bool>,
+    mut expr_config: ResMut<ExpressionConfig>,
+    mut expr_status: ResMut<ExpressionStatus>,
+    entities: Res<SceneEntities>,
+    rotation: Res<CameraRotation>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut query_cam_transform: Query<&mut Transform>,
+    mut voxel_count: ResMut<VoxelCount>,
+) {
+    let Ok(ctx) = egui_contexts.ctx_mut() else {
+        return;
+    };
+
+    egui::SidePanel::left("left_panel")
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.heading("Generation");
+
+            ui.label("Expression (x, y, z):");
+            if ui.text_edit_singleline(&mut expr_config.expr).changed() {
+                *regenerate_request = true;
+                expr_status.error = None;
+            }
+
+            if let Some(ref error) = expr_status.error {
+                ui.label(
+                    egui::RichText::new(format!("❌ {error}"))
+                        .color(egui::Color32::RED)
+                        .small(),
+                );
+            } else if expr_status.is_valid && !expr_config.expr.trim().is_empty() {
+                ui.label(
+                    egui::RichText::new("✅ Valid expression")
+                        .color(egui::Color32::GREEN)
+                        .small(),
+                );
+            }
+
+            ui.label(
+                egui::RichText::new("Tip: ^ = power (x^2), * = multiply, + - / work as expected")
+                    .italics()
+                    .small()
+                    .color(egui::Color32::from_gray(180)),
+            );
+
+            ui.separator();
+
+            ui.label("Grid Size:");
+            ui.horizontal(|ui| {
+                if ui.button("-").clicked() && grid_config.size > 2 {
+                    grid_config.size = if grid_config.size > 8 {
+                        grid_config.size.saturating_sub(8)
+                    } else if grid_config.size > 4 {
+                        grid_config.size.saturating_sub(4)
+                    } else {
+                        grid_config.size.saturating_sub(2).max(2)
+                    };
+                    *regenerate_request = true;
+                }
+
+                let mut size = grid_config.size as i32;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut size, 2..=256)
+                            .logarithmic(false)
+                            .custom_formatter(|n, _| format!("{n:.0}")),
+                    )
+                    .changed()
+                {
+                    grid_config.size = size as u32;
+                    *regenerate_request = true;
+                }
+
+                if ui.button("+").clicked() && grid_config.size < 256 {
+                    grid_config.size = if grid_config.size <= 2 {
+                        (grid_config.size + 2).min(256)
+                    } else if grid_config.size <= 4 {
+                        (grid_config.size + 4).min(256)
+                    } else if grid_config.size < 8 {
+                        8
+                    } else {
+                        (grid_config.size + 8).min(256)
+                    };
+                    *regenerate_request = true;
+                }
+            });
+
+            ui.separator();
+
+            if ui.button("Regenerate").clicked() {
+                *regenerate_request = true;
+            }
+
+            ui.checkbox(&mut auto_regen.enabled, "Auto Regenerate");
+
+            let cam_label = match *camera_mode {
+                CameraMode::AutoOrbit => "Camera: Auto",
+                CameraMode::Manual => "Camera: Manual",
+            };
+            if ui.button(cam_label).clicked() {
+                let center = grid_config.center();
+                *camera_mode = match *camera_mode {
+                    CameraMode::AutoOrbit => {
+                        for mut poc in &mut query_cam {
+                            poc.enabled = true;
+                            poc.focus = center;
+                            poc.target_focus = center;
+                        }
+                        CameraMode::Manual
+                    }
+                    CameraMode::Manual => {
+                        for mut poc in &mut query_cam {
+                            poc.enabled = false;
+                        }
+                        CameraMode::AutoOrbit
+                    }
                 };
             }
-        }
-    }
-}
-
-fn setup_grid_ui(mut commands: Commands) {
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(12.0),
-                right: Val::Px(12.0),
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                padding: UiRect::all(Val::Px(8.0)),
-                border: UiRect::all(Val::Px(1.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
-            BorderColor::all(Color::srgb(0.3, 0.3, 0.3)),
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("Grid Size: "),
-                TextFont {
-                    font_size: 18.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.95, 0.95, 0.95)),
-            ));
-
-            // Minus button
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(30.0),
-                        height: Val::Px(30.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        margin: UiRect::horizontal(Val::Px(4.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 0.8)),
-                    BorderColor::all(Color::srgb(0.5, 0.5, 0.5)),
-                    GridMinusButton,
-                ))
-                .with_children(|p| {
-                    p.spawn((
-                        Text::new("-"),
-                        TextFont {
-                            font_size: 20.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-                    ));
-                });
-
-            // Size text
-            parent.spawn((
-                Text::new("64"),
-                TextFont {
-                    font_size: 18.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.95, 0.95, 0.95)),
-                GridSizeText,
-            ));
-
-            // Plus button
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(30.0),
-                        height: Val::Px(30.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        margin: UiRect::horizontal(Val::Px(4.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 0.8)),
-                    BorderColor::all(Color::srgb(0.5, 0.5, 0.5)),
-                    GridPlusButton,
-                ))
-                .with_children(|p| {
-                    p.spawn((
-                        Text::new("+"),
-                        TextFont {
-                            font_size: 20.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.95, 0.95, 0.95)),
-                    ));
-                });
         });
-}
 
-#[allow(clippy::too_many_arguments)]
-fn rebuild_scene(
-    mut commands: Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-    grid_config: &GridConfig,
-    entities: &SceneEntities,
-    rotation: &CameraRotation,
-    camera_mode: &CameraMode,
-    mut query_cam: Query<&mut Transform>,
-) {
-    let (grid, voxel_count) = generate_voxels(grid_config);
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    );
+    egui::Window::new("Statistics")
+        .anchor(egui::Align2::RIGHT_TOP, [-12.0, 12.0])
+        .show(ctx, |ui| {
+            let fps = diagnostics
+                .get(&FrameTimeDiagnosticsPlugin::FPS)
+                .and_then(|d| d.smoothed())
+                .map(|v| v.round() as u32)
+                .unwrap_or(0);
+            ui.label(format!("FPS: {fps}"));
+            ui.label(format!("Grid: {}³", grid_config.size));
+            ui.label(format!("Voxels: {}", voxel_count.0));
+            ui.label(format!(
+                "Fill: {:.1}%",
+                (voxel_count.0 as f32 / (grid_config.size.pow(3) as f32)) * 100.0
+            ));
+        });
 
-    #[cfg(target_arch = "wasm32")]
-    build_batched_mesh_with_global_corner_ambient_occlusion(
-        &mut mesh,
-        &grid,
-        grid_config,
-        voxel_count,
-    );
+    let should_regenerate = *regenerate_request || auto_regen.enabled;
+    *regenerate_request = false;
 
-    #[cfg(not(target_arch = "wasm32"))]
-    build_batched_mesh_with_global_corner_ambient_occlusion_par(
-        &mut mesh,
-        &grid,
-        grid_config,
-        voxel_count,
-    );
+    if should_regenerate {
+        let (grid, count) = generate_voxels(&grid_config, &expr_config, &mut expr_status);
+        voxel_count.0 = count;
 
-    commands
-        .entity(entities.voxel_mesh)
-        .insert(Mesh3d(meshes.add(mesh)))
-        .insert(MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            unlit: true,
-            perceptual_roughness: 0.0,
-            metallic: 0.0,
-            reflectance: 0.0,
-            ..default()
-        })));
-
-    let center = grid_config.center();
-
-    match camera_mode {
-        CameraMode::AutoOrbit => {
-            let radius = grid_config.camera_radius();
-            let height = grid_config.camera_height();
-            let angle = rotation.angle;
-
-            commands.entity(entities.camera).insert(
-                Transform::from_xyz(
-                    center.x + radius * angle.cos(),
-                    center.y + height,
-                    center.z + radius * angle.sin(),
-                )
-                .looking_at(center, Vec3::Y),
-            );
-        }
-        CameraMode::Manual => {
-            // Manual: update camera focus to look at new center
-            commands.entity(entities.camera).insert(PanOrbitCamera {
-                focus: center,
-                target_focus: center,
-                ..default()
-            });
-            // Immediately update camera transform to look at new center
-            if let Ok(mut transform) = query_cam.get_mut(entities.camera) {
-                transform.look_at(center, Vec3::Y);
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn update_grid_ui(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    query_minus: Query<&Interaction, (Changed<Interaction>, With<GridMinusButton>)>,
-    query_plus: Query<&Interaction, (Changed<Interaction>, With<GridPlusButton>)>,
-    mut grid_config: ResMut<GridConfig>,
-    mut text_query: Query<&mut Text, With<GridSizeText>>,
-    entities: Res<SceneEntities>,
-    rotation: Res<CameraRotation>,
-    camera_mode: Res<CameraMode>,
-    query_cam: Query<&mut Transform>,
-) {
-    let mut changed = false;
-
-    if let Ok(interaction) = query_minus.single()
-        && *interaction == Interaction::Pressed
-    {
-        if grid_config.size > 8 {
-            grid_config.size = grid_config.size.saturating_sub(8);
-            changed = true;
-        } else if grid_config.size > 4 {
-            grid_config.size = grid_config.size.saturating_sub(4);
-            changed = true;
-        } else if grid_config.size > 2 {
-            grid_config.size = grid_config.size.saturating_sub(2).max(2);
-            changed = true;
-        }
-    }
-
-    if let Ok(interaction) = query_plus.single()
-        && *interaction == Interaction::Pressed
-        && grid_config.size < 256
-    {
-        if grid_config.size <= 2 {
-            grid_config.size = (grid_config.size + 2).min(256);
-        } else if grid_config.size <= 4 {
-            grid_config.size = (grid_config.size + 4).min(256);
-        } else if grid_config.size < 8 {
-            grid_config.size = 8;
-        } else {
-            grid_config.size = (grid_config.size + 8).min(256);
-        }
-        changed = true;
-    }
-
-    if changed {
-        if let Ok(mut text) = text_query.single_mut() {
-            text.0 = grid_config.size.to_string();
-        } else {
-            warn!("GridSizeText entity not found or duplicated, UI may be out of sync");
-        }
-
-        rebuild_scene(
-            commands.reborrow(),
-            &mut meshes,
-            &mut materials,
-            &grid_config,
-            &entities,
-            &rotation,
-            &camera_mode,
-            query_cam,
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
         );
-    }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn regenerate_voxels(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    query_button: Query<&Interaction, (Changed<Interaction>, With<RegenerateButton>)>,
-    query_auto_button: Query<
-        &Interaction,
-        (Changed<Interaction>, With<RegenerateEveryFrameButton>),
-    >,
-    mut auto_regen: ResMut<RegenerateEveryFrame>,
-    grid_config: Res<GridConfig>,
-    entities: Res<SceneEntities>,
-    rotation: Res<CameraRotation>,
-    camera_mode: Res<CameraMode>,
-    query_cam: Query<&mut Transform>,
-    mut query_auto_text: Query<&mut Text, With<RegenerateEveryFrameText>>,
-) {
-    if let Ok(interaction) = query_auto_button.single()
-        && *interaction == Interaction::Pressed
-    {
-        auto_regen.enabled = !auto_regen.enabled;
-        if let Ok(mut text) = query_auto_text.single_mut() {
-            text.0 = if auto_regen.enabled {
-                "Auto Regen: ON"
-            } else {
-                "Auto Regen: OFF"
+        #[cfg(target_arch = "wasm32")]
+        build_batched_mesh_with_global_corner_ambient_occlusion(
+            &mut mesh,
+            &grid,
+            &grid_config,
+            count,
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        build_batched_mesh_with_global_corner_ambient_occlusion_par(
+            &mut mesh,
+            &grid,
+            &grid_config,
+            count,
+        );
+
+        commands
+            .entity(entities.voxel_mesh)
+            .insert(Mesh3d(meshes.add(mesh)))
+            .insert(MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                unlit: true,
+                perceptual_roughness: 0.0,
+                metallic: 0.0,
+                reflectance: 0.0,
+                ..default()
+            })));
+
+        let center = grid_config.center();
+        match *camera_mode {
+            CameraMode::AutoOrbit => {
+                let radius = grid_config.camera_radius();
+                let height = grid_config.camera_height();
+                let angle = rotation.angle;
+                commands.entity(entities.camera).insert(
+                    Transform::from_xyz(
+                        center.x + radius * angle.cos(),
+                        center.y + height,
+                        center.z + radius * angle.sin(),
+                    )
+                    .looking_at(center, Vec3::Y),
+                );
             }
-            .into();
+            CameraMode::Manual => {
+                commands.entity(entities.camera).insert(PanOrbitCamera {
+                    focus: center,
+                    target_focus: center,
+                    ..default()
+                });
+                if let Ok(mut transform) = query_cam_transform.get_mut(entities.camera) {
+                    transform.look_at(center, Vec3::Y);
+                }
+            }
         }
     }
-
-    let should_regenerate = query_button
-        .single()
-        .is_ok_and(|i| *i == Interaction::Pressed)
-        || auto_regen.enabled;
-
-    if !should_regenerate {
-        return;
-    }
-
-    rebuild_scene(
-        commands.reborrow(),
-        &mut meshes,
-        &mut materials,
-        &grid_config,
-        &entities,
-        &rotation,
-        &camera_mode,
-        query_cam,
-    );
 }
