@@ -66,15 +66,26 @@ struct RegenerateEveryFrame {
     enabled: bool,
 }
 
+#[derive(Clone)]
+struct ExpressionEntry {
+    expr: String,
+    color: (u8, u8, u8),
+    enabled: bool,
+}
+
 #[derive(Resource)]
 struct ExpressionConfig {
-    expr: String,
+    entries: Vec<ExpressionEntry>,
 }
 
 impl Default for ExpressionConfig {
     fn default() -> Self {
         Self {
-            expr: "x^2 + z * y - 64.0".into(),
+            entries: vec![ExpressionEntry {
+                expr: "x^2 + z * y - 64.0".into(),
+                color: rand::random(),
+                enabled: true,
+            }],
         }
     }
 }
@@ -85,7 +96,7 @@ struct VoxelCount(pub usize);
 #[derive(Resource, Default)]
 struct ExpressionStatus {
     is_valid: bool,
-    error: Option<String>,
+    errors: Vec<String>,
 }
 
 type Grid = Vec<u32>;
@@ -240,6 +251,7 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     grid_config: Res<GridConfig>,
     mut expr_status: ResMut<ExpressionStatus>,
+    expr_config: Res<ExpressionConfig>,
 ) {
     let center = grid_config.center();
     let camera_radius = grid_config.camera_radius();
@@ -265,8 +277,7 @@ fn setup(
         ))
         .id();
 
-    let expr_config = ExpressionConfig::default();
-    let (grid, voxel_count) = generate_voxels(&grid_config, &expr_config, &mut expr_status);
+    let (grids, voxel_count) = generate_voxels(&grid_config, &expr_config, &mut expr_status);
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
@@ -275,7 +286,7 @@ fn setup(
     #[cfg(target_arch = "wasm32")]
     build_batched_mesh_with_global_corner_ambient_occlusion(
         &mut mesh,
-        &grid,
+        &grids,
         &grid_config,
         voxel_count,
     );
@@ -283,7 +294,7 @@ fn setup(
     #[cfg(not(target_arch = "wasm32"))]
     build_batched_mesh_with_global_corner_ambient_occlusion_par(
         &mut mesh,
-        &grid,
+        &grids,
         &grid_config,
         voxel_count,
     );
@@ -319,39 +330,80 @@ fn generate_voxels(
     grid_config: &GridConfig,
     expr_config: &ExpressionConfig,
     expr_status: &mut ExpressionStatus,
-) -> (Grid, usize) {
+) -> (Vec<Grid>, usize) {
     let size_usize = grid_config.size as usize;
     let half_extent = (grid_config.size as f64) / 2.0;
-    let expr = &expr_config.expr;
 
-    if let Err(e) = validate_expression(expr) {
-        expr_status.is_valid = false;
-        expr_status.error = Some(e);
-        return (vec![0; size_usize.pow(3)], 0);
-    }
-    expr_status.is_valid = true;
-    expr_status.error = None;
+    expr_status.errors.clear();
 
-    let base_color = rand::random::<u32>() & 0xFFFFFF;
+    let mut grids = Vec::with_capacity(expr_config.entries.len());
 
-    match math::generate_voxel_grid(size_usize, expr, base_color, half_extent) {
-        Ok(grid) => {
-            let voxel_count = grid.iter().filter(|&&v| v != 0).count();
-            (grid, voxel_count)
+    for (idx, entry) in expr_config.entries.iter().enumerate() {
+        if !entry.enabled {
+            grids.push(vec![0; size_usize.pow(3)]);
+            continue;
         }
-        Err(e) => {
-            error!("Error evaluating expression: {}", e);
+
+        if let Err(e) = validate_expression(&entry.expr) {
             expr_status.is_valid = false;
-            expr_status.error = Some(format!("Eval error: {e}"));
-            (vec![0; size_usize.pow(3)], 0)
+            expr_status
+                .errors
+                .push(format!("Expression #{} '{}': {}", idx + 1, entry.expr, e));
+            grids.push(vec![0; size_usize.pow(3)]);
+            continue;
+        }
+
+        let base_color =
+            ((entry.color.0 as u32) << 16) | ((entry.color.1 as u32) << 8) | (entry.color.2 as u32);
+
+        match math::generate_voxel_grid(size_usize, &entry.expr, base_color, half_extent) {
+            Ok(grid) => {
+                grids.push(grid);
+            }
+            Err(e) => {
+                error!(
+                    "Error evaluating expression #{} '{}': {}",
+                    idx + 1,
+                    entry.expr,
+                    e
+                );
+                expr_status.is_valid = false;
+                expr_status.errors.push(format!(
+                    "Eval error for #{} '{}': {}",
+                    idx + 1,
+                    entry.expr,
+                    e
+                ));
+                grids.push(vec![0; size_usize.pow(3)]);
+            }
         }
     }
+
+    let mut rendered_voxel_count = 0;
+    let total_positions = size_usize.pow(3);
+    for idx in 0..total_positions {
+        if grids.iter().any(|grid| grid[idx] != 0) {
+            rendered_voxel_count += 1;
+        }
+    }
+
+    // Only mark as valid if no errors occurred AND at least one enabled expression exists
+    if expr_status.errors.is_empty()
+        && expr_config
+            .entries
+            .iter()
+            .any(|e| e.enabled && !e.expr.trim().is_empty())
+    {
+        expr_status.is_valid = true;
+    }
+
+    (grids, rendered_voxel_count)
 }
 
-fn process_x_range(
+fn process_x_range_multi(
     x_start: u32,
     x_end: u32,
-    grid: &Grid,
+    grids: &[Grid],
     size: u32,
     voxel_count: usize,
 ) -> MeshData {
@@ -367,7 +419,14 @@ fn process_x_range(
         for y in 0..size {
             for z in 0..size {
                 let idx = grid_index(x as usize, y as usize, z as usize, size_usize);
-                let voxel_val = grid[idx];
+
+                // Find first non-zero voxel value across all grids (priority by order)
+                let voxel_val = grids
+                    .iter()
+                    .map(|grid| grid[idx])
+                    .find(|&v| v != 0)
+                    .unwrap_or(0);
+
                 if voxel_val == 0 {
                     continue;
                 }
@@ -375,6 +434,7 @@ fn process_x_range(
                 let base_linear = decode_color(voxel_val);
                 let offset = Vec3::new(x as f32, y as f32, z as f32);
 
+                // Compute ambient occlusion using composite occupancy
                 let mut corner_ambient_occlusion = [1.0f32; 8];
                 for cx_off in 0..2 {
                     for cy_off in 0..2 {
@@ -385,14 +445,24 @@ fn process_x_range(
                             let cz = z as i32 + cz_off as i32;
 
                             let mut occlusion = 0;
-                            if is_occupied(grid, cx - 1, cy, cz, size_i32, size_usize) {
-                                occlusion += 1;
+                            // Check occupancy across all grids for each axis
+                            for grid in grids {
+                                if is_occupied(grid, cx - 1, cy, cz, size_i32, size_usize) {
+                                    occlusion += 1;
+                                    break;
+                                }
                             }
-                            if is_occupied(grid, cx, cy - 1, cz, size_i32, size_usize) {
-                                occlusion += 1;
+                            for grid in grids {
+                                if is_occupied(grid, cx, cy - 1, cz, size_i32, size_usize) {
+                                    occlusion += 1;
+                                    break;
+                                }
                             }
-                            if is_occupied(grid, cx, cy, cz - 1, size_i32, size_usize) {
-                                occlusion += 1;
+                            for grid in grids {
+                                if is_occupied(grid, cx, cy, cz - 1, size_i32, size_usize) {
+                                    occlusion += 1;
+                                    break;
+                                }
                             }
                             corner_ambient_occlusion[corner_idx] =
                                 AMBIENT_OCCLUSION_FACTORS[occlusion];
@@ -405,7 +475,12 @@ fn process_x_range(
                     let ny = y as i32 + neighbor_offset[1];
                     let nz = z as i32 + neighbor_offset[2];
 
-                    if is_occupied(grid, nx, ny, nz, size_i32, size_usize) {
+                    // Check if neighbor is occupied by any function
+                    let neighbor_occupied = grids
+                        .iter()
+                        .any(|grid| is_occupied(grid, nx, ny, nz, size_i32, size_usize));
+
+                    if neighbor_occupied {
                         continue;
                     }
 
@@ -488,13 +563,14 @@ fn process_x_range(
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn build_batched_mesh_with_global_corner_ambient_occlusion(
     mesh: &mut Mesh,
-    grid: &Grid,
+    grids: &[Grid],
     grid_config: &GridConfig,
     voxel_count: usize,
 ) {
     info!("voxel_count: {}", voxel_count);
     let size = grid_config.size;
-    let (positions, normals, colors, indices) = process_x_range(0, size, grid, size, voxel_count);
+    let (positions, normals, colors, indices) =
+        process_x_range_multi(0, size, grids, size, voxel_count);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
@@ -504,7 +580,7 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion(
 #[cfg(not(target_arch = "wasm32"))]
 fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
     mesh: &mut Mesh,
-    grid: &Grid,
+    grids: &[Grid],
     grid_config: &GridConfig,
     voxel_count: usize,
 ) {
@@ -519,7 +595,7 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
         .map(|x_range| {
             let x_start = x_range[0];
             let x_end = x_range[x_range.len() - 1] + 1;
-            process_x_range(x_start, x_end, grid, size, voxel_count_per_chunk)
+            process_x_range_multi(x_start, x_end, grids, size, voxel_count_per_chunk)
         })
         .collect();
 
@@ -608,21 +684,85 @@ fn egui_ui_system(
         .show(ctx, |ui| {
             ui.heading("Generation");
 
-            ui.label("Expression (x, y, z):");
-            if ui.text_edit_singleline(&mut expr_config.expr).changed() {
+            ui.label("Expressions:");
+
+            // Scrollable area for expression list with fixed max height
+            egui::ScrollArea::vertical()
+                .max_height(300.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let mut remove_idx = None;
+                    for (idx, entry) in expr_config.entries.iter_mut().enumerate() {
+                        egui::CollapsingHeader::new(format!("Function #{}", idx + 1))
+                            .id_salt(("func_header", idx))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                // Trigger regeneration when enabled state changes
+                                if ui.checkbox(&mut entry.enabled, "Enabled").changed() {
+                                    *regenerate_request = true;
+                                }
+
+                                ui.label("Expression (x, y, z):");
+                                if ui.text_edit_singleline(&mut entry.expr).changed() {
+                                    *regenerate_request = true;
+                                    expr_status.errors.clear();
+                                }
+
+                                ui.label("Color:");
+                                ui.horizontal(|ui| {
+                                    let mut color_edit = egui::Color32::from_rgb(
+                                        entry.color.0,
+                                        entry.color.1,
+                                        entry.color.2,
+                                    );
+                                    if ui.color_edit_button_srgba(&mut color_edit).changed() {
+                                        entry.color =
+                                            (color_edit.r(), color_edit.g(), color_edit.b());
+                                        *regenerate_request = true;
+                                    }
+                                });
+
+                                if ui.small_button("❌ Remove").clicked() {
+                                    remove_idx = Some(idx);
+                                }
+                            });
+                        ui.separator();
+                    }
+
+                    // Apply removals after iteration to avoid borrow issues
+                    if let Some(idx) = remove_idx {
+                        expr_config.entries.remove(idx);
+                        *regenerate_request = true;
+                    }
+                });
+
+            ui.separator();
+
+            if ui.button("➕ Add Expression").clicked() {
+                expr_config.entries.push(ExpressionEntry {
+                    expr: String::new(),
+                    color: rand::random(),
+                    enabled: true,
+                });
                 *regenerate_request = true;
-                expr_status.error = None;
             }
 
-            if let Some(ref error) = expr_status.error {
+            if !expr_status.errors.is_empty() {
+                for error in &expr_status.errors {
+                    ui.label(
+                        egui::RichText::new(format!("❌ {error}"))
+                            .color(egui::Color32::RED)
+                            .small(),
+                    );
+                }
+            } else if expr_status.is_valid
+                && expr_config
+                    .entries
+                    .iter()
+                    .any(|e| e.enabled && !e.expr.trim().is_empty())
+            {
                 ui.label(
-                    egui::RichText::new(format!("❌ {error}"))
-                        .color(egui::Color32::RED)
-                        .small(),
-                );
-            } else if expr_status.is_valid && !expr_config.expr.trim().is_empty() {
-                ui.label(
-                    egui::RichText::new("✅ Valid expression")
+                    egui::RichText::new("✅ Valid expressions")
                         .color(egui::Color32::GREEN)
                         .small(),
                 );
@@ -720,7 +860,7 @@ fn egui_ui_system(
                 .unwrap_or(0);
             ui.label(format!("FPS: {fps}"));
             ui.label(format!("Grid: {}³", grid_config.size));
-            ui.label(format!("Voxels: {}", voxel_count.0));
+            ui.label(format!("Rendered Voxels: {}", voxel_count.0));
             ui.label(format!(
                 "Fill: {:.1}%",
                 (voxel_count.0 as f32 / (grid_config.size.pow(3) as f32)) * 100.0
@@ -731,7 +871,7 @@ fn egui_ui_system(
     *regenerate_request = false;
 
     if should_regenerate {
-        let (grid, count) = generate_voxels(&grid_config, &expr_config, &mut expr_status);
+        let (grids, count) = generate_voxels(&grid_config, &expr_config, &mut expr_status);
         voxel_count.0 = count;
 
         let mut mesh = Mesh::new(
@@ -742,7 +882,7 @@ fn egui_ui_system(
         #[cfg(target_arch = "wasm32")]
         build_batched_mesh_with_global_corner_ambient_occlusion(
             &mut mesh,
-            &grid,
+            &grids,
             &grid_config,
             count,
         );
@@ -750,7 +890,7 @@ fn egui_ui_system(
         #[cfg(not(target_arch = "wasm32"))]
         build_batched_mesh_with_global_corner_ambient_occlusion_par(
             &mut mesh,
-            &grid,
+            &grids,
             &grid_config,
             count,
         );
