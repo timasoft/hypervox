@@ -14,6 +14,8 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
+use crate::math::DimConfig;
+
 mod math;
 
 type Vec3Arr = [f32; 3];
@@ -25,6 +27,7 @@ const AMBIENT_OCCLUSION_FACTORS: [f32; 4] = [1.0, 0.75, 0.5, 0.3];
 #[derive(Resource)]
 struct GridConfig {
     size: u32,
+    voxel_count: usize,
 }
 
 impl GridConfig {
@@ -40,6 +43,51 @@ impl GridConfig {
     #[inline]
     fn camera_height(&self) -> f32 {
         self.size as f32 * 0.8
+    }
+}
+
+#[derive(Resource)]
+struct DimMapping {
+    ndim: usize,
+    x_dim: usize,
+    y_dim: usize,
+    z_dim: usize,
+    fixed: Vec<f64>,
+}
+
+impl Default for DimMapping {
+    fn default() -> Self {
+        Self {
+            ndim: 3,
+            x_dim: 0,
+            y_dim: 1,
+            z_dim: 2,
+            fixed: vec![0.0; 3],
+        }
+    }
+}
+
+impl From<&DimMapping> for DimConfig {
+    fn from(value: &DimMapping) -> Self {
+        Self {
+            ndim: value.ndim,
+            x_dim: value.x_dim,
+            y_dim: value.y_dim,
+            z_dim: value.z_dim,
+            fixed: value.fixed.clone(),
+        }
+    }
+}
+
+impl From<DimMapping> for DimConfig {
+    fn from(value: DimMapping) -> Self {
+        Self {
+            ndim: value.ndim,
+            x_dim: value.x_dim,
+            y_dim: value.y_dim,
+            z_dim: value.z_dim,
+            fixed: value.fixed,
+        }
     }
 }
 
@@ -89,9 +137,6 @@ impl Default for ExpressionConfig {
         }
     }
 }
-
-#[derive(Resource)]
-struct VoxelCount(pub usize);
 
 #[derive(Resource, Default)]
 struct ExpressionStatus {
@@ -210,7 +255,7 @@ fn validate_expression(expr: &str) -> Result<(), String> {
     }
 
     if trimmed.contains("**") {
-        return Err("Use ^ for power (e.g. x^2), not **. Example: x^2 + y*z - 64".into());
+        return Err("Use ^ for power (e.g. x0^2), not **".into());
     }
 
     use evalexpr::DefaultNumericTypes;
@@ -232,7 +277,11 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::WHITE))
-        .insert_resource(GridConfig { size: 64 })
+        .insert_resource(GridConfig {
+            size: 64,
+            voxel_count: 0,
+        })
+        .insert_resource(DimMapping::default())
         .insert_resource(ExpressionConfig::default())
         .insert_resource(ExpressionStatus::default())
         .insert_resource(RegenerateEveryFrame { enabled: false })
@@ -249,9 +298,10 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    grid_config: Res<GridConfig>,
+    mut grid_config: ResMut<GridConfig>,
     mut expr_status: ResMut<ExpressionStatus>,
     expr_config: Res<ExpressionConfig>,
+    dim_mapping: Res<DimMapping>,
 ) {
     let center = grid_config.center();
     let camera_radius = grid_config.camera_radius();
@@ -277,7 +327,9 @@ fn setup(
         ))
         .id();
 
-    let (grids, voxel_count) = generate_voxels(&grid_config, &expr_config, &mut expr_status);
+    let (grids, voxel_count) =
+        generate_voxels(&grid_config, &expr_config, &mut expr_status, &dim_mapping);
+    grid_config.voxel_count = voxel_count;
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
@@ -323,13 +375,13 @@ fn setup(
         speed: 0.5,
     });
     commands.insert_resource(CameraMode::AutoOrbit);
-    commands.insert_resource(VoxelCount(voxel_count));
 }
 
 fn generate_voxels(
     grid_config: &GridConfig,
     expr_config: &ExpressionConfig,
     expr_status: &mut ExpressionStatus,
+    dim_mapping: &DimMapping,
 ) -> (Vec<Grid>, usize) {
     let size_usize = grid_config.size as usize;
     let half_extent = (grid_config.size as f64) / 2.0;
@@ -356,7 +408,13 @@ fn generate_voxels(
         let base_color =
             ((entry.color.0 as u32) << 16) | ((entry.color.1 as u32) << 8) | (entry.color.2 as u32);
 
-        match math::generate_voxel_grid(size_usize, &entry.expr, base_color, half_extent) {
+        match math::generate_voxel_grid(
+            size_usize,
+            &entry.expr,
+            base_color,
+            half_extent,
+            &dim_mapping.into(),
+        ) {
             Ok(grid) => {
                 grids.push(grid);
             }
@@ -662,6 +720,7 @@ fn egui_ui_system(
     mut egui_contexts: EguiContexts,
     diagnostics: Res<DiagnosticsStore>,
     mut grid_config: ResMut<GridConfig>,
+    mut dim_mapping: ResMut<DimMapping>,
     mut camera_mode: ResMut<CameraMode>,
     mut query_cam: Query<&mut PanOrbitCamera>,
     mut auto_regen: ResMut<RegenerateEveryFrame>,
@@ -673,7 +732,6 @@ fn egui_ui_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut query_cam_transform: Query<&mut Transform>,
-    mut voxel_count: ResMut<VoxelCount>,
 ) {
     let Ok(ctx) = egui_contexts.ctx_mut() else {
         return;
@@ -702,7 +760,7 @@ fn egui_ui_system(
                                     *regenerate_request = true;
                                 }
 
-                                ui.label("Expression (x, y, z):");
+                                ui.label("Expression:");
                                 if ui.text_edit_singleline(&mut entry.expr).changed() {
                                     *regenerate_request = true;
                                     expr_status.errors.clear();
@@ -768,12 +826,26 @@ fn egui_ui_system(
                 );
             }
 
-            ui.label(
-                egui::RichText::new("Tip: ^ = power (x^2), * = multiply, + - / work as expected")
+            if dim_mapping.ndim > 3 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Tip: ^=power, vars: x,y,z (axes), x0..x{} (dims)",
+                        dim_mapping.ndim - 1
+                    ))
                     .italics()
                     .small()
                     .color(egui::Color32::from_gray(180)),
-            );
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(
+                        "Tip: ^ = power (x^2), * = multiply, + - / work as expected",
+                    )
+                    .italics()
+                    .small()
+                    .color(egui::Color32::from_gray(180)),
+                );
+            }
 
             ui.separator();
 
@@ -819,6 +891,129 @@ fn egui_ui_system(
 
             ui.separator();
 
+            // --- Dimension Configuration ---
+            ui.label("Dimensions (N):");
+            ui.horizontal(|ui| {
+                let mut ndim = dim_mapping.ndim as i32;
+                if ui
+                    .add(egui::Slider::new(&mut ndim, 3..=16).logarithmic(false))
+                    .changed()
+                {
+                    dim_mapping.ndim = ndim as usize;
+                    let n = dim_mapping.ndim;
+                    dim_mapping.fixed.resize(n, 0.0);
+                    dim_mapping.x_dim = dim_mapping.x_dim.min(dim_mapping.ndim - 1);
+                    dim_mapping.y_dim = dim_mapping.y_dim.min(dim_mapping.ndim - 1);
+                    dim_mapping.z_dim = dim_mapping.z_dim.min(dim_mapping.ndim - 1);
+                    if dim_mapping.y_dim == dim_mapping.x_dim {
+                        dim_mapping.y_dim = (dim_mapping.y_dim + 1) % dim_mapping.ndim;
+                    }
+                    if dim_mapping.z_dim == dim_mapping.x_dim
+                        || dim_mapping.z_dim == dim_mapping.y_dim
+                    {
+                        for d in 0..dim_mapping.ndim {
+                            if d != dim_mapping.x_dim && d != dim_mapping.y_dim {
+                                dim_mapping.z_dim = d;
+                                break;
+                            }
+                        }
+                    }
+                    *regenerate_request = true;
+                }
+            });
+
+            ui.label("Axis Mapping:");
+            let ndim = dim_mapping.ndim;
+            let mut x_dim = dim_mapping.x_dim;
+            let mut y_dim = dim_mapping.y_dim;
+            let mut z_dim = dim_mapping.z_dim;
+
+            ui.horizontal(|ui| {
+                ui.label("X ←");
+                egui::ComboBox::from_id_salt("x_dim_map")
+                    .selected_text(format!("x{x_dim}"))
+                    .show_ui(ui, |ui| {
+                        for d in 0..ndim {
+                            let is_taken = d == y_dim || d == z_dim;
+                            if !is_taken || d == x_dim {
+                                ui.selectable_value(&mut x_dim, d, format!("x{d}"));
+                            }
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label("Y ←");
+                egui::ComboBox::from_id_salt("y_dim_map")
+                    .selected_text(format!("x{y_dim}"))
+                    .show_ui(ui, |ui| {
+                        for d in 0..ndim {
+                            let is_taken = d == x_dim || d == z_dim;
+                            if !is_taken || d == y_dim {
+                                ui.selectable_value(&mut y_dim, d, format!("x{d}"));
+                            }
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label("Z ←");
+                egui::ComboBox::from_id_salt("z_dim_map")
+                    .selected_text(format!("x{z_dim}"))
+                    .show_ui(ui, |ui| {
+                        for d in 0..ndim {
+                            let is_taken = d == x_dim || d == y_dim;
+                            if !is_taken || d == z_dim {
+                                ui.selectable_value(&mut z_dim, d, format!("x{d}"));
+                            }
+                        }
+                    });
+            });
+
+            if x_dim != dim_mapping.x_dim
+                || y_dim != dim_mapping.y_dim
+                || z_dim != dim_mapping.z_dim
+            {
+                // Ensure distinct mapping
+                if x_dim == y_dim {
+                    y_dim = (y_dim + 1) % ndim;
+                }
+                if x_dim == z_dim || y_dim == z_dim {
+                    for d in 0..ndim {
+                        if d != x_dim && d != y_dim {
+                            z_dim = d;
+                            break;
+                        }
+                    }
+                }
+                dim_mapping.x_dim = x_dim;
+                dim_mapping.y_dim = y_dim;
+                dim_mapping.z_dim = z_dim;
+                *regenerate_request = true;
+            }
+
+            // Fixed values for non-spatial dims
+            let half_extent = grid_config.size as f64 / 2.0;
+            for d in 0..dim_mapping.ndim {
+                if d != dim_mapping.x_dim && d != dim_mapping.y_dim && d != dim_mapping.z_dim {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("x{d}:"));
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut dim_mapping.fixed[d],
+                                    -half_extent..=half_extent,
+                                )
+                                .logarithmic(false),
+                            )
+                            .changed()
+                        {
+                            *regenerate_request = true;
+                        }
+                    });
+                }
+            }
+
+            ui.separator();
+
             if ui.button("Regenerate").clicked() {
                 *regenerate_request = true;
             }
@@ -859,11 +1054,20 @@ fn egui_ui_system(
                 .map(|v| v.round() as u32)
                 .unwrap_or(0);
             ui.label(format!("FPS: {fps}"));
-            ui.label(format!("Grid: {}³", grid_config.size));
-            ui.label(format!("Rendered Voxels: {}", voxel_count.0));
+            if dim_mapping.ndim > 3 {
+                ui.label(format!(
+                    "Grid: {}³ (N={}, dims 0..{})",
+                    grid_config.size,
+                    dim_mapping.ndim,
+                    dim_mapping.ndim - 1
+                ));
+            } else {
+                ui.label(format!("Grid: {}³", grid_config.size));
+            }
+            ui.label(format!("Rendered Voxels: {}", grid_config.voxel_count));
             ui.label(format!(
                 "Fill: {:.1}%",
-                (voxel_count.0 as f32 / (grid_config.size.pow(3) as f32)) * 100.0
+                (grid_config.voxel_count as f32 / (grid_config.size.pow(3) as f32)) * 100.0
             ));
         });
 
@@ -871,8 +1075,9 @@ fn egui_ui_system(
     *regenerate_request = false;
 
     if should_regenerate {
-        let (grids, count) = generate_voxels(&grid_config, &expr_config, &mut expr_status);
-        voxel_count.0 = count;
+        let (grids, count) =
+            generate_voxels(&grid_config, &expr_config, &mut expr_status, &dim_mapping);
+        grid_config.voxel_count = count;
 
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,

@@ -3,18 +3,52 @@ use evalexpr::{
     HashMapContext, Node, Value, build_operator_tree,
 };
 
-/// Generates a voxel grid of size `size^3`.
-/// - `expr_str`: mathematical expression in terms of x, y, z
+use crate::DimMapping;
+
+/// Configuration for N-dimensional to 3D spatial mapping.
+/// Maps N dimensions (0..ndim) to 3D spatial axes (X, Y, Z).
+/// Dimensions not mapped to any axis are held at fixed values.
+/// Expression variables: x,y,z (spatial axes) and x0..x{N-1} (dimension coords).
+#[derive(Debug)]
+pub struct DimConfig {
+    pub ndim: usize,
+    /// Which dimension index varies along the X axis
+    pub x_dim: usize,
+    /// Which dimension index varies along the Y axis
+    pub y_dim: usize,
+    /// Which dimension index varies along the Z axis
+    pub z_dim: usize,
+    /// Fixed coordinate value for each dimension (used for non-spatial dims)
+    pub fixed: Vec<f64>,
+}
+
+impl Default for DimConfig {
+    fn default() -> Self {
+        DimMapping::default().into()
+    }
+}
+
+/// Generates a voxel grid of size `size^3` from an N-dimensional expression.
+/// - `expr_str`: mathematical expression in terms of x,y,z (spatial) and x0..x{N-1} (dims)
 /// - `base_color`: 24-bit RGB color (0xRRGGBB). Stored in grid as `base_color + 1`
 /// - `world_half_extent`: half the size of the region in world units.
+/// - `dim`: N-dimensional mapping config
 pub fn generate_voxel_grid(
     size: usize,
     expr_str: &str,
     base_color: u32,
     world_half_extent: f64,
+    dim: &DimConfig,
 ) -> Result<Vec<u32>, String> {
     if size == 0 {
         return Ok(Vec::new());
+    }
+
+    if dim.x_dim >= dim.ndim || dim.y_dim >= dim.ndim || dim.z_dim >= dim.ndim {
+        return Err(format!(
+            "Axis mapping out of range: x_dim={}, y_dim={}, z_dim={} with ndim={}",
+            dim.x_dim, dim.y_dim, dim.z_dim, dim.ndim
+        ));
     }
 
     let tree: Node = build_operator_tree(expr_str).map_err(|e| format!("Parse error: {e}"))?;
@@ -37,6 +71,7 @@ pub fn generate_voxel_grid(
         node_dim_sq,
         step,
         world_half_extent,
+        dim,
     )?;
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -47,6 +82,7 @@ pub fn generate_voxel_grid(
         node_dim_sq,
         step,
         world_half_extent,
+        dim,
     )?;
 
     for vz in 0..size {
@@ -329,6 +365,7 @@ fn register_math_functions(ctx: &mut HashMapContext) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline]
 fn eval_sign_at_point(
     tree: &Node,
@@ -338,6 +375,7 @@ fn eval_sign_at_point(
     nz: usize,
     step: f64,
     world_half_extent: f64,
+    dim: &DimConfig,
 ) -> Result<i8, String> {
     let fx = -world_half_extent + nx as f64 * step;
     let fy = -world_half_extent + ny as f64 * step;
@@ -349,6 +387,22 @@ fn eval_sign_at_point(
         .map_err(|e| format!("Context error: {e}"))?;
     ctx.set_value("z".to_string(), Value::Float(fz))
         .map_err(|e| format!("Context error: {e}"))?;
+
+    for d in 0..dim.ndim {
+        let val = if d == dim.x_dim {
+            fx
+        } else if d == dim.y_dim {
+            fy
+        } else if d == dim.z_dim {
+            fz
+        } else if d < dim.fixed.len() {
+            dim.fixed[d]
+        } else {
+            0.0
+        };
+        ctx.set_value(format!("x{d}"), Value::Float(val))
+            .map_err(|e| format!("Context error: {e}"))?;
+    }
 
     let val = tree
         .eval_with_context(ctx)
@@ -379,6 +433,7 @@ fn compute_sign_grid(
     node_dim_sq: usize,
     step: f64,
     world_half_extent: f64,
+    dim: &DimConfig,
 ) -> Result<(), String> {
     let mut ctx = HashMapContext::new();
     register_math_functions(&mut ctx)?;
@@ -386,7 +441,8 @@ fn compute_sign_grid(
     for nz in 0..node_dim {
         for ny in 0..node_dim {
             for nx in 0..node_dim {
-                let sign = eval_sign_at_point(tree, &mut ctx, nx, ny, nz, step, world_half_extent)?;
+                let sign =
+                    eval_sign_at_point(tree, &mut ctx, nx, ny, nz, step, world_half_extent, dim)?;
 
                 let idx = nx + ny * node_dim + nz * node_dim_sq;
                 sign_grid[idx] = sign;
@@ -404,6 +460,7 @@ fn compute_sign_grid_par(
     node_dim_sq: usize,
     step: f64,
     world_half_extent: f64,
+    dim: &DimConfig,
 ) -> Result<(), String> {
     use rayon::prelude::*;
 
@@ -430,6 +487,7 @@ fn compute_sign_grid_par(
                             nz,
                             step,
                             world_half_extent,
+                            dim,
                         )?;
 
                         let idx = nx + ny * node_dim + nz * node_dim_sq;
@@ -456,7 +514,8 @@ mod tests {
     #[test]
     fn test_sphere_generation() {
         // Sphere of radius 2 in region [-5, 5]
-        let grid = generate_voxel_grid(32, "x^2 + y^2 + z^2 - 4", 0xFF0000, 5.0).unwrap();
+        let dim = DimConfig::default();
+        let grid = generate_voxel_grid(32, "x^2 + y^2 + z^2 - 4", 0xFF0000, 5.0, &dim).unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
         assert!(filled > 0 && filled < grid.len());
     }
@@ -464,9 +523,29 @@ mod tests {
     #[test]
     fn test_sinusoidal_surface() {
         // Test that sin function works
-        let grid = generate_voxel_grid(16, "sin(x) + cos(y) + z", 0x00FF00, 8.0).unwrap();
+        let dim = DimConfig::default();
+        let grid = generate_voxel_grid(16, "sin(x) + cos(y) + z", 0x00FF00, 8.0, &dim).unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
         // Should generate some voxels, but not all
         assert!(filled > 0 && filled < grid.len());
+    }
+
+    #[test]
+    fn test_4d_nd_variables() {
+        // 4D: x0=sphere radius, x1=x, x2=y, x3=z
+        // expression uses x0 (dim 3) as extra, mapped such that X=x0, Y=x1, Z=x2, x3 fixed
+        let dim = DimConfig {
+            ndim: 4,
+            x_dim: 1,
+            y_dim: 2,
+            z_dim: 3,
+            fixed: vec![0.0, 0.0, 0.0, 0.0],
+        };
+        // x1^2 + x2^2 + x3^2 - x0^2 (sphere with radius x0)
+        // with x3 mapped to Z, x0 fixed at 0.0 → radius 0 → no sphere
+        let grid =
+            generate_voxel_grid(16, "x1^2 + x2^2 + x3^2 - x0^2", 0x00FF00, 8.0, &dim).unwrap();
+        let filled = grid.iter().filter(|&&v| v != 0).count();
+        assert_eq!(filled, 0);
     }
 }
