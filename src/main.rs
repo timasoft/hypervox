@@ -1028,18 +1028,21 @@ fn egui_ui_system(
             }
 
             // Fixed values for non-spatial dims
-            let half_extent = grid_config.size as f64 / 2.0 * grid_config.voxel_size;
+            let max_offset = first_bad_offset(grid_config.voxel_size)
+                - (grid_config.size as f64 / 2.0) * grid_config.voxel_size;
             for d in 0..dim_mapping.ndim {
                 if d != dim_mapping.x_dim && d != dim_mapping.y_dim && d != dim_mapping.z_dim {
                     ui.horizontal(|ui| {
                         ui.label(format!("x{d}:"));
                         if ui
                             .add(
-                                egui::Slider::new(
-                                    &mut dim_mapping.fixed[d],
-                                    -half_extent..=half_extent,
-                                )
-                                .logarithmic(false),
+                                egui::DragValue::new(&mut dim_mapping.fixed[d])
+                                    .speed(0.0)
+                                    .custom_formatter(|val, _| {
+                                        let s = format!("{:.6}", val);
+                                        s.trim_end_matches('0').trim_end_matches('.').to_string()
+                                    })
+                                    .range(-max_offset..=max_offset),
                             )
                             .changed()
                         {
@@ -1060,8 +1063,7 @@ fn egui_ui_system(
             ui.separator();
 
             ui.collapsing("View Offset", |ui| {
-                let max_abs_offset = first_bad_offset(grid_config.voxel_size)
-                    - (grid_config.size as f64 / 2.0) * grid_config.voxel_size;
+                let max_abs_offset = max_offset;
 
                 let mut changed = false;
                 let mut ox = dim_mapping.world_offset.0;
