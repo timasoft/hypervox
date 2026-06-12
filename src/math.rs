@@ -20,6 +20,8 @@ pub struct DimConfig {
     pub z_dim: usize,
     /// Fixed coordinate value for each dimension (used for non-spatial dims)
     pub fixed: Vec<f64>,
+    /// Offset of the evaluation window in world units
+    pub world_offset: (f64, f64, f64),
 }
 
 impl Default for DimConfig {
@@ -377,9 +379,9 @@ fn eval_sign_at_point(
     world_half_extent: f64,
     dim: &DimConfig,
 ) -> Result<i8, String> {
-    let fx = -world_half_extent + nx as f64 * step;
-    let fy = -world_half_extent + ny as f64 * step;
-    let fz = -world_half_extent + nz as f64 * step;
+    let fx = -world_half_extent + dim.world_offset.0 + nx as f64 * step;
+    let fy = -world_half_extent + dim.world_offset.1 + ny as f64 * step;
+    let fz = -world_half_extent + dim.world_offset.2 + nz as f64 * step;
 
     ctx.set_value("x".to_string(), Value::Float(fx))
         .map_err(|e| format!("Context error: {e}"))?;
@@ -540,6 +542,7 @@ mod tests {
             y_dim: 2,
             z_dim: 3,
             fixed: vec![0.0, 0.0, 0.0, 0.0],
+            ..DimConfig::default()
         };
         // x1^2 + x2^2 + x3^2 - x0^2 (sphere with radius x0)
         // with x3 mapped to Z, x0 fixed at 0.0 → radius 0 → no sphere

@@ -18,6 +18,21 @@ use crate::math::DimConfig;
 
 mod math;
 
+/// First value `v` where `v + step == v` due to f64 rounding.
+/// Always a power of two: `pow2_ceil(step * 2^53)`.
+#[inline]
+fn first_bad_offset(step: f64) -> f64 {
+    let v = step * (1u64 << f64::MANTISSA_DIGITS) as f64;
+    let bits = v.to_bits();
+    let mantissa_bits = f64::MANTISSA_DIGITS as u64 - 1;
+    let mantissa_mask = (1u64 << mantissa_bits) - 1;
+    if bits & mantissa_mask == 0 {
+        v
+    } else {
+        f64::from_bits((bits & !mantissa_mask) + (1u64 << mantissa_bits))
+    }
+}
+
 type Vec3Arr = [f32; 3];
 type IVec3Arr = [i32; 3];
 type CornerArr = [Vec3Arr; 4];
@@ -54,6 +69,7 @@ struct DimMapping {
     y_dim: usize,
     z_dim: usize,
     fixed: Vec<f64>,
+    world_offset: (f64, f64, f64),
 }
 
 impl Default for DimMapping {
@@ -64,6 +80,7 @@ impl Default for DimMapping {
             y_dim: 1,
             z_dim: 2,
             fixed: vec![0.0; 3],
+            world_offset: (0.0, 0.0, 0.0),
         }
     }
 }
@@ -76,6 +93,7 @@ impl From<&DimMapping> for DimConfig {
             y_dim: value.y_dim,
             z_dim: value.z_dim,
             fixed: value.fixed.clone(),
+            world_offset: value.world_offset,
         }
     }
 }
@@ -88,6 +106,7 @@ impl From<DimMapping> for DimConfig {
             y_dim: value.y_dim,
             z_dim: value.z_dim,
             fixed: value.fixed,
+            world_offset: value.world_offset,
         }
     }
 }
@@ -1037,6 +1056,77 @@ fn egui_ui_system(
             }
 
             ui.checkbox(&mut auto_regen.enabled, "Auto Regenerate");
+
+            ui.separator();
+
+            ui.collapsing("View Offset", |ui| {
+                let max_abs_offset = first_bad_offset(grid_config.voxel_size)
+                    - (grid_config.size as f64 / 2.0) * grid_config.voxel_size;
+
+                let mut changed = false;
+                let mut ox = dim_mapping.world_offset.0;
+                let mut oy = dim_mapping.world_offset.1;
+                let mut oz = dim_mapping.world_offset.2;
+
+                ui.horizontal(|ui| {
+                    ui.label("X:");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut ox)
+                                .speed(0.0)
+                                .custom_formatter(|val, _| {
+                                    let s = format!("{:.6}", val);
+                                    s.trim_end_matches('0').trim_end_matches('.').to_string()
+                                })
+                                .range(-max_abs_offset..=max_abs_offset),
+                        )
+                        .changed();
+                    if ui.small_button("↺").clicked() {
+                        ox = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Y:");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut oy)
+                                .speed(0.0)
+                                .custom_formatter(|val, _| {
+                                    let s = format!("{:.6}", val);
+                                    s.trim_end_matches('0').trim_end_matches('.').to_string()
+                                })
+                                .range(-max_abs_offset..=max_abs_offset),
+                        )
+                        .changed();
+                    if ui.small_button("↺").clicked() {
+                        oy = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Z:");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut oz)
+                                .speed(0.0)
+                                .custom_formatter(|val, _| {
+                                    let s = format!("{:.6}", val);
+                                    s.trim_end_matches('0').trim_end_matches('.').to_string()
+                                })
+                                .range(-max_abs_offset..=max_abs_offset),
+                        )
+                        .changed();
+                    if ui.small_button("↺").clicked() {
+                        oz = 0.0;
+                        changed = true;
+                    }
+                });
+                if changed {
+                    dim_mapping.world_offset = (ox, oy, oz);
+                    *regenerate_request = true;
+                }
+            });
 
             let cam_label = match *camera_mode {
                 CameraMode::AutoOrbit => "Camera: Auto",
