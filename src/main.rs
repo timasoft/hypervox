@@ -27,6 +27,7 @@ const AMBIENT_OCCLUSION_FACTORS: [f32; 4] = [1.0, 0.75, 0.5, 0.3];
 #[derive(Resource)]
 struct GridConfig {
     size: u32,
+    voxel_size: f64,
     voxel_count: usize,
 }
 
@@ -279,6 +280,7 @@ fn main() {
         .insert_resource(ClearColor(Color::WHITE))
         .insert_resource(GridConfig {
             size: 64,
+            voxel_size: 1.0,
             voxel_count: 0,
         })
         .insert_resource(DimMapping::default())
@@ -384,7 +386,7 @@ fn generate_voxels(
     dim_mapping: &DimMapping,
 ) -> (Vec<Grid>, usize) {
     let size_usize = grid_config.size as usize;
-    let half_extent = (grid_config.size as f64) / 2.0;
+    let half_extent = (grid_config.size as f64) / 2.0 * grid_config.voxel_size;
 
     expr_status.errors.clear();
 
@@ -889,6 +891,22 @@ fn egui_ui_system(
                 }
             });
 
+            ui.label("Voxel Size:");
+            ui.horizontal(|ui| {
+                let mut vs = grid_config.voxel_size as f32;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut vs, 0.1..=10.0)
+                            .logarithmic(true)
+                            .custom_formatter(|n, _| format!("{n:.2}")),
+                    )
+                    .changed()
+                {
+                    grid_config.voxel_size = vs as f64;
+                    *regenerate_request = true;
+                }
+            });
+
             ui.separator();
 
             // --- Dimension Configuration ---
@@ -991,7 +1009,7 @@ fn egui_ui_system(
             }
 
             // Fixed values for non-spatial dims
-            let half_extent = grid_config.size as f64 / 2.0;
+            let half_extent = grid_config.size as f64 / 2.0 * grid_config.voxel_size;
             for d in 0..dim_mapping.ndim {
                 if d != dim_mapping.x_dim && d != dim_mapping.y_dim && d != dim_mapping.z_dim {
                     ui.horizontal(|ui| {
