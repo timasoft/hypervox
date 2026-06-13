@@ -129,6 +129,23 @@ enum CameraMode {
     Manual,
 }
 
+#[derive(Resource, Clone, PartialEq)]
+struct ShowAxesPlanes {
+    show_axes: bool,
+    show_ground_grid: bool,
+    show_planes: bool,
+}
+
+impl Default for ShowAxesPlanes {
+    fn default() -> Self {
+        Self {
+            show_axes: true,
+            show_ground_grid: false,
+            show_planes: false,
+        }
+    }
+}
+
 #[derive(Resource)]
 struct RegenerateEveryFrame {
     enabled: bool,
@@ -306,11 +323,20 @@ fn main() {
         .insert_resource(ExpressionConfig::default())
         .insert_resource(ExpressionStatus::default())
         .insert_resource(RegenerateEveryFrame { enabled: false })
+        .insert_resource(ShowAxesPlanes::default())
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(PanOrbitCameraPlugin)
         .add_plugins(EguiPlugin::default())
         .add_systems(Startup, setup)
-        .add_systems(Update, (rotate_camera, update_ui_scale_from_browser))
+        .add_systems(
+            Update,
+            (
+                rotate_camera,
+                update_ui_scale_from_browser,
+                draw_axes_and_planes,
+            ),
+        )
+        .add_systems(EguiPrimaryContextPass, egui_overlays_system)
         .add_systems(EguiPrimaryContextPass, egui_ui_system)
         .run();
 }
@@ -696,6 +722,94 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
+}
+
+fn egui_overlays_system(
+    mut egui_contexts: EguiContexts,
+    mut show_axes_planes: ResMut<ShowAxesPlanes>,
+) {
+    let Ok(ctx) = egui_contexts.ctx_mut() else {
+        return;
+    };
+
+    egui::Window::new("Overlays")
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -12.0])
+        .show(ctx, |ui| {
+            ui.checkbox(&mut show_axes_planes.show_axes, "Show Axes");
+            ui.checkbox(&mut show_axes_planes.show_ground_grid, "Show Ground Grid");
+            ui.checkbox(&mut show_axes_planes.show_planes, "Show Reference Planes");
+        });
+}
+
+fn draw_axes_and_planes(
+    mut gizmos: Gizmos,
+    grid_config: Res<GridConfig>,
+    show: Res<ShowAxesPlanes>,
+) {
+    let center = grid_config.center();
+    let min = -0.5;
+    let max = grid_config.size as f32 - 0.5;
+
+    if show.show_axes {
+        gizmos.line(
+            Vec3::new(min, center.y, center.z),
+            Vec3::new(max, center.y, center.z),
+            Color::srgb(1.0, 0.2, 0.2),
+        );
+        gizmos.line(
+            Vec3::new(center.x, min, center.z),
+            Vec3::new(center.x, max, center.z),
+            Color::srgb(0.2, 1.0, 0.2),
+        );
+        gizmos.line(
+            Vec3::new(center.x, center.y, min),
+            Vec3::new(center.x, center.y, max),
+            Color::srgb(0.2, 0.2, 1.0),
+        );
+    }
+
+    let n = grid_config.size;
+    let step = ((n as f32 / 32.0).round() as u32).next_power_of_two();
+
+    if show.show_ground_grid {
+        let y = min;
+        let gc = Color::srgba(0.5, 0.5, 0.5, 0.35);
+
+        for i in (0..=n).step_by(step as usize) {
+            let p = i as f32 - 0.5;
+            gizmos.line(Vec3::new(min, y, p), Vec3::new(max, y, p), gc);
+            gizmos.line(Vec3::new(p, y, min), Vec3::new(p, y, max), gc);
+        }
+    }
+
+    if show.show_planes {
+        // XY plane at z = center.z — red grid
+        let z = center.z;
+        let cr = Color::srgba(1.0, 0.2, 0.2, 0.3);
+        for i in (0..=n).step_by(step as usize) {
+            let p = i as f32 - 0.5;
+            gizmos.line(Vec3::new(min, p, z), Vec3::new(max, p, z), cr);
+            gizmos.line(Vec3::new(p, min, z), Vec3::new(p, max, z), cr);
+        }
+
+        // XZ plane at y = center.y — green grid
+        let y = center.y;
+        let cg = Color::srgba(0.2, 1.0, 0.2, 0.3);
+        for i in (0..=n).step_by(step as usize) {
+            let p = i as f32 - 0.5;
+            gizmos.line(Vec3::new(min, y, p), Vec3::new(max, y, p), cg);
+            gizmos.line(Vec3::new(p, y, min), Vec3::new(p, y, max), cg);
+        }
+
+        // YZ plane at x = center.x — blue grid
+        let x = center.x;
+        let cb = Color::srgba(0.2, 0.2, 1.0, 0.3);
+        for i in (0..=n).step_by(step as usize) {
+            let p = i as f32 - 0.5;
+            gizmos.line(Vec3::new(x, min, p), Vec3::new(x, max, p), cb);
+            gizmos.line(Vec3::new(x, p, min), Vec3::new(x, p, max), cb);
+        }
+    }
 }
 
 fn rotate_camera(
