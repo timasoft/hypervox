@@ -367,44 +367,43 @@ fn register_math_functions(ctx: &mut HashMapContext) -> Result<(), String> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+fn prepare_context(dim: &DimConfig) -> Result<HashMapContext, String> {
+    let mut ctx = HashMapContext::new();
+    register_math_functions(&mut ctx)?;
+
+    for d in 0..dim.ndim {
+        if d != dim.x_dim && d != dim.y_dim && d != dim.z_dim {
+            let val = if d < dim.fixed.len() { dim.fixed[d] } else { 0.0 };
+            ctx.set_value(format!("x{d}"), Value::Float(val))
+                .map_err(|e| format!("Context error: {e}"))?;
+        }
+    }
+
+    Ok(ctx)
+}
+
 #[inline]
 fn eval_sign_at_point(
     tree: &Node,
     ctx: &mut HashMapContext,
-    nx: usize,
-    ny: usize,
-    nz: usize,
-    step: f64,
-    world_half_extent: f64,
+    fx: f64,
+    fy: f64,
+    fz: f64,
     dim: &DimConfig,
 ) -> Result<i8, String> {
-    let fx = -world_half_extent + dim.world_offset.0 + nx as f64 * step;
-    let fy = -world_half_extent + dim.world_offset.1 + ny as f64 * step;
-    let fz = -world_half_extent + dim.world_offset.2 + nz as f64 * step;
-
-    ctx.set_value("x".to_string(), Value::Float(fx))
+    ctx.set_value("x".into(), Value::Float(fx))
         .map_err(|e| format!("Context error: {e}"))?;
-    ctx.set_value("y".to_string(), Value::Float(fy))
+    ctx.set_value("y".into(), Value::Float(fy))
         .map_err(|e| format!("Context error: {e}"))?;
-    ctx.set_value("z".to_string(), Value::Float(fz))
+    ctx.set_value("z".into(), Value::Float(fz))
         .map_err(|e| format!("Context error: {e}"))?;
 
-    for d in 0..dim.ndim {
-        let val = if d == dim.x_dim {
-            fx
-        } else if d == dim.y_dim {
-            fy
-        } else if d == dim.z_dim {
-            fz
-        } else if d < dim.fixed.len() {
-            dim.fixed[d]
-        } else {
-            0.0
-        };
-        ctx.set_value(format!("x{d}"), Value::Float(val))
-            .map_err(|e| format!("Context error: {e}"))?;
-    }
+    ctx.set_value(format!("x{}", dim.x_dim), Value::Float(fx))
+        .map_err(|e| format!("Context error: {e}"))?;
+    ctx.set_value(format!("x{}", dim.y_dim), Value::Float(fy))
+        .map_err(|e| format!("Context error: {e}"))?;
+    ctx.set_value(format!("x{}", dim.z_dim), Value::Float(fz))
+        .map_err(|e| format!("Context error: {e}"))?;
 
     let val = tree
         .eval_with_context(ctx)
@@ -437,17 +436,21 @@ fn compute_sign_grid(
     world_half_extent: f64,
     dim: &DimConfig,
 ) -> Result<(), String> {
-    let mut ctx = HashMapContext::new();
-    register_math_functions(&mut ctx)?;
+    let mut ctx = prepare_context(dim)?;
+
+    let x0 = -world_half_extent + dim.world_offset.0;
+    let y0 = -world_half_extent + dim.world_offset.1;
+    let z0 = -world_half_extent + dim.world_offset.2;
 
     for nz in 0..node_dim {
+        let fz = z0 + nz as f64 * step;
         for ny in 0..node_dim {
+            let fy = y0 + ny as f64 * step;
+            let mut fx = x0;
             for nx in 0..node_dim {
-                let sign =
-                    eval_sign_at_point(tree, &mut ctx, nx, ny, nz, step, world_half_extent, dim)?;
-
                 let idx = nx + ny * node_dim + nz * node_dim_sq;
-                sign_grid[idx] = sign;
+                sign_grid[idx] = eval_sign_at_point(tree, &mut ctx, fx, fy, fz, dim)?;
+                fx += step;
             }
         }
     }
@@ -469,31 +472,28 @@ fn compute_sign_grid_par(
     let chunk_count = std::cmp::min(num_cpus::get(), node_dim);
     let chunk_size = (node_dim as f64 / chunk_count as f64).ceil() as usize;
 
+    let x0 = -world_half_extent + dim.world_offset.0;
+    let y0 = -world_half_extent + dim.world_offset.1;
+    let z0 = -world_half_extent + dim.world_offset.2;
+
     let results: Result<Vec<Vec<(usize, i8)>>, String> = (0..node_dim)
         .collect::<Vec<_>>()
         .par_chunks(chunk_size)
         .map(|z_range| {
-            let mut ctx = HashMapContext::new();
-            register_math_functions(&mut ctx)?;
+            let mut ctx = prepare_context(dim)?;
 
             let mut local_signs = Vec::with_capacity(z_range.len() * node_dim * node_dim);
 
             for &nz in z_range {
+                let fz = z0 + nz as f64 * step;
                 for ny in 0..node_dim {
+                    let fy = y0 + ny as f64 * step;
+                    let mut fx = x0;
                     for nx in 0..node_dim {
-                        let sign = eval_sign_at_point(
-                            tree,
-                            &mut ctx,
-                            nx,
-                            ny,
-                            nz,
-                            step,
-                            world_half_extent,
-                            dim,
-                        )?;
-
+                        let sign = eval_sign_at_point(tree, &mut ctx, fx, fy, fz, dim)?;
                         let idx = nx + ny * node_dim + nz * node_dim_sq;
                         local_signs.push((idx, sign));
+                        fx += step;
                     }
                 }
             }
