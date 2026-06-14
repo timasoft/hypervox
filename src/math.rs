@@ -1,9 +1,5 @@
-use evalexpr::{
-    ContextWithMutableFunctions, ContextWithMutableVariables, DefaultNumericTypes, EvalexprError,
-    HashMapContext, Node, Value, build_operator_tree,
-};
-
 use crate::DimMapping;
+use crate::expr;
 
 /// Configuration for N-dimensional to 3D spatial mapping.
 /// Maps N dimensions (0..ndim) to 3D spatial axes (X, Y, Z).
@@ -53,7 +49,7 @@ pub fn generate_voxel_grid(
         ));
     }
 
-    let tree: Node = build_operator_tree(expr_str).map_err(|e| format!("Parse error: {e}"))?;
+    let expr = expr::parse(expr_str, dim)?;
 
     let node_dim = size + 1;
     let node_dim_sq = node_dim * node_dim;
@@ -68,24 +64,24 @@ pub fn generate_voxel_grid(
     #[cfg(target_arch = "wasm32")]
     compute_sign_grid(
         &mut sign_grid,
-        &tree,
+        &expr,
         node_dim,
         node_dim_sq,
         step,
         world_half_extent,
         dim,
-    )?;
+    );
 
     #[cfg(not(target_arch = "wasm32"))]
     compute_sign_grid_par(
         &mut sign_grid,
-        &tree,
+        &expr,
         node_dim,
         node_dim_sq,
         step,
         world_half_extent,
         dim,
-    )?;
+    );
 
     for vz in 0..size {
         let base_z = vz * node_dim_sq;
@@ -134,309 +130,54 @@ pub fn generate_voxel_grid(
     Ok(voxel_grid)
 }
 
-/// Helper: extract a single f64 from function args (handles both direct value and 1-element tuple)
 #[inline]
-fn get_float_arg(
-    args: &Value<DefaultNumericTypes>,
-) -> Result<f64, EvalexprError<DefaultNumericTypes>> {
-    let val = match args {
-        Value::Tuple(t) if t.len() == 1 => &t[0],
-        v => v,
-    };
-    val.as_float()
-}
-
-/// Helper: extract two f64 values from function args (expects a 2-element tuple)
-#[inline]
-fn get_two_float_args(
-    args: &Value<DefaultNumericTypes>,
-) -> Result<(f64, f64), EvalexprError<DefaultNumericTypes>> {
-    let tuple = args.as_tuple()?;
-    if tuple.len() != 2 {
-        return Err(EvalexprError::wrong_function_argument_amount(
-            tuple.len(),
-            2,
-        ));
-    }
-    let a = tuple[0].as_float()?;
-    let b = tuple[1].as_float()?;
-    Ok((a, b))
-}
-
-/// Registers common math functions into the evalexpr context.
-/// HashMapContext doesn't include built-in functions by default, so we add them manually.
-#[inline]
-fn register_math_functions(ctx: &mut HashMapContext) -> Result<(), String> {
-    use evalexpr::Function;
-
-    // Trigonometric (radians)
-    ctx.set_function(
-        "sin".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.sin()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "cos".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.cos()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "tan".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.tan()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "asin".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.asin()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "acos".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.acos()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "atan".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.atan()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "atan2".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_two_float_args(args).map(|(y, x)| Value::Float(y.atan2(x)))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Hyperbolic
-    ctx.set_function(
-        "sinh".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.sinh()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "cosh".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.cosh()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "tanh".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.tanh()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Exponential/logarithmic
-    ctx.set_function(
-        "sqrt".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.sqrt()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "cbrt".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.cbrt()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "exp".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.exp()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "ln".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.ln()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "log10".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.log10()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "log2".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.log2()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Power function (dynamic exponent)
-    ctx.set_function(
-        "pow".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_two_float_args(args).map(|(base, exp)| Value::Float(base.powf(exp)))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Rounding
-    ctx.set_function(
-        "floor".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.floor()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "ceil".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.ceil()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "round".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.round()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "trunc".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.trunc()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Other utilities
-    ctx.set_function(
-        "abs".into(),
-        Function::<DefaultNumericTypes>::new(|args| {
-            get_float_arg(args).map(|v| Value::Float(v.abs()))
-        }),
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Constants as zero-argument functions
-    ctx.set_function(
-        "PI".into(),
-        Function::<DefaultNumericTypes>::new(|_| Ok(Value::Float(std::f64::consts::PI))),
-    )
-    .map_err(|e| e.to_string())?;
-
-    ctx.set_function(
-        "E".into(),
-        Function::<DefaultNumericTypes>::new(|_| Ok(Value::Float(std::f64::consts::E))),
-    )
-    .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-fn prepare_context(dim: &DimConfig) -> Result<HashMapContext, String> {
-    let mut ctx = HashMapContext::new();
-    register_math_functions(&mut ctx)?;
-
-    for d in 0..dim.ndim {
-        if d != dim.x_dim && d != dim.y_dim && d != dim.z_dim {
-            let val = if d < dim.fixed.len() { dim.fixed[d] } else { 0.0 };
-            ctx.set_value(format!("x{d}"), Value::Float(val))
-                .map_err(|e| format!("Context error: {e}"))?;
-        }
-    }
-
-    Ok(ctx)
-}
-
-#[inline]
-fn eval_sign_at_point(
-    tree: &Node,
-    ctx: &mut HashMapContext,
-    fx: f64,
-    fy: f64,
-    fz: f64,
-    dim: &DimConfig,
-) -> Result<i8, String> {
-    ctx.set_value("x".into(), Value::Float(fx))
-        .map_err(|e| format!("Context error: {e}"))?;
-    ctx.set_value("y".into(), Value::Float(fy))
-        .map_err(|e| format!("Context error: {e}"))?;
-    ctx.set_value("z".into(), Value::Float(fz))
-        .map_err(|e| format!("Context error: {e}"))?;
-
-    ctx.set_value(format!("x{}", dim.x_dim), Value::Float(fx))
-        .map_err(|e| format!("Context error: {e}"))?;
-    ctx.set_value(format!("x{}", dim.y_dim), Value::Float(fy))
-        .map_err(|e| format!("Context error: {e}"))?;
-    ctx.set_value(format!("x{}", dim.z_dim), Value::Float(fz))
-        .map_err(|e| format!("Context error: {e}"))?;
-
-    let val = tree
-        .eval_with_context(ctx)
-        .map_err(|e| format!("Eval at ({fx},{fy},{fz}): {e}"))?;
-
-    let num = val
-        .as_float()
-        .map_err(|e| format!("Expected number at ({fx},{fy},{fz}): {e}"))?;
-
-    let sign = if !num.is_finite() {
+fn eval_sign(val: f64) -> i8 {
+    if !val.is_finite() {
         0
-    } else if num > 0.0 {
+    } else if val > 0.0 {
         1
-    } else if num < 0.0 {
+    } else if val < 0.0 {
         -1
     } else {
         0
-    };
+    }
+}
 
-    Ok(sign)
+#[inline]
+fn init_fixed_vars(dim: &DimConfig) -> Vec<f64> {
+    let mut vars = vec![0.0; dim.ndim];
+    for (d, v) in vars.iter_mut().enumerate() {
+        if d != dim.x_dim && d != dim.y_dim && d != dim.z_dim {
+            *v = if d < dim.fixed.len() {
+                dim.fixed[d]
+            } else {
+                0.0
+            };
+        }
+    }
+
+    vars
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn compute_sign_grid(
     sign_grid: &mut [i8],
-    tree: &Node,
+    expr: &expr::Node,
     node_dim: usize,
     node_dim_sq: usize,
     step: f64,
     world_half_extent: f64,
     dim: &DimConfig,
-) -> Result<(), String> {
-    let mut ctx = prepare_context(dim)?;
+) {
+    let mut vars = init_fixed_vars(dim);
+
+    let mut vars_options: Vec<Option<f64>> = vars.iter().copied().map(Some).collect();
+    for idx in [dim.x_dim, dim.y_dim, dim.z_dim] {
+        vars_options[idx] = None;
+    }
+
+    let mut expr = expr.clone();
+    expr.pre_eval(&vars_options);
 
     let x0 = -world_half_extent + dim.world_offset.0;
     let y0 = -world_half_extent + dim.world_offset.1;
@@ -444,29 +185,30 @@ fn compute_sign_grid(
 
     for nz in 0..node_dim {
         let fz = z0 + nz as f64 * step;
+        vars[dim.z_dim] = fz;
         for ny in 0..node_dim {
             let fy = y0 + ny as f64 * step;
-            let mut fx = x0;
+            vars[dim.y_dim] = fy;
             for nx in 0..node_dim {
+                let fx = x0 + nx as f64 * step;
+                vars[dim.x_dim] = fx;
                 let idx = nx + ny * node_dim + nz * node_dim_sq;
-                sign_grid[idx] = eval_sign_at_point(tree, &mut ctx, fx, fy, fz, dim)?;
-                fx += step;
+                sign_grid[idx] = eval_sign(expr.eval(&vars));
             }
         }
     }
-    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn compute_sign_grid_par(
     sign_grid: &mut [i8],
-    tree: &Node,
+    expr: &expr::Node,
     node_dim: usize,
     node_dim_sq: usize,
     step: f64,
     world_half_extent: f64,
     dim: &DimConfig,
-) -> Result<(), String> {
+) {
     use rayon::prelude::*;
 
     let chunk_count = std::cmp::min(num_cpus::get(), node_dim);
@@ -476,37 +218,47 @@ fn compute_sign_grid_par(
     let y0 = -world_half_extent + dim.world_offset.1;
     let z0 = -world_half_extent + dim.world_offset.2;
 
-    let results: Result<Vec<Vec<(usize, i8)>>, String> = (0..node_dim)
+    let base_vars = init_fixed_vars(dim);
+
+    let mut base_vars_options: Vec<Option<f64>> = base_vars.iter().copied().map(Some).collect();
+    for idx in [dim.x_dim, dim.y_dim, dim.z_dim] {
+        base_vars_options[idx] = None;
+    }
+
+    let mut expr = expr.clone();
+    expr.pre_eval(&base_vars_options);
+
+    let results: Vec<Vec<(usize, i8)>> = (0..node_dim)
         .collect::<Vec<_>>()
         .par_chunks(chunk_size)
         .map(|z_range| {
-            let mut ctx = prepare_context(dim)?;
-
+            let mut vars = base_vars.clone();
             let mut local_signs = Vec::with_capacity(z_range.len() * node_dim * node_dim);
 
             for &nz in z_range {
                 let fz = z0 + nz as f64 * step;
+                vars[dim.z_dim] = fz;
                 for ny in 0..node_dim {
                     let fy = y0 + ny as f64 * step;
-                    let mut fx = x0;
+                    vars[dim.y_dim] = fy;
                     for nx in 0..node_dim {
-                        let sign = eval_sign_at_point(tree, &mut ctx, fx, fy, fz, dim)?;
+                        let fx = x0 + nx as f64 * step;
+                        vars[dim.x_dim] = fx;
+                        let sign = eval_sign(expr.eval(&vars));
                         let idx = nx + ny * node_dim + nz * node_dim_sq;
                         local_signs.push((idx, sign));
-                        fx += step;
                     }
                 }
             }
-            Ok(local_signs)
+            local_signs
         })
         .collect();
 
-    for chunk in results? {
+    for chunk in results {
         for (idx, sign) in chunk {
             sign_grid[idx] = sign;
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]

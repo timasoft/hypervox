@@ -16,6 +16,7 @@ use rayon::prelude::*;
 
 use crate::math::DimConfig;
 
+mod expr;
 mod math;
 
 /// First value `v` where `v + step == v` due to f64 rounding.
@@ -285,20 +286,13 @@ fn is_occupied(
     grid[grid_index(x as usize, y as usize, z as usize, grid_size_usize)] != 0
 }
 
-fn validate_expression(expr: &str) -> Result<(), String> {
-    let trimmed = expr.trim();
+fn validate_expression(expr_str: &str, dim_mapping: &DimMapping) -> Result<(), String> {
+    let trimmed = expr_str.trim();
     if trimmed.is_empty() {
         return Err("Expression cannot be empty".into());
     }
 
-    if trimmed.contains("**") {
-        return Err("Use ^ for power (e.g. x0^2), not **".into());
-    }
-
-    use evalexpr::DefaultNumericTypes;
-    evalexpr::build_operator_tree::<DefaultNumericTypes>(trimmed)
-        .map(|_| ())
-        .map_err(|e| format!("Parse error: {e}"))
+    expr::parse(trimmed, &dim_mapping.into()).map(|_| ())
 }
 
 fn main() {
@@ -443,7 +437,7 @@ fn generate_voxels(
             continue;
         }
 
-        if let Err(e) = validate_expression(&entry.expr) {
+        if let Err(e) = validate_expression(&entry.expr, dim_mapping) {
             expr_status.is_valid = false;
             expr_status
                 .errors
