@@ -567,9 +567,9 @@ fn process_x_range_multi(
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(voxel_count * 30);
     let mut indices: Vec<u32> = Vec::with_capacity(voxel_count * 72);
 
-    for x in x_start..x_end {
+    for z in 0..size {
         for y in 0..size {
-            for z in 0..size {
+            for x in x_start..x_end {
                 let idx = grid_index(x as usize, y as usize, z as usize, size_usize);
 
                 let voxel_val = composite[idx];
