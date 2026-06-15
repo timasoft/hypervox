@@ -101,49 +101,27 @@ pub fn generate_voxel_grid(
 
     let fill_start = Instant::now();
 
-    for vz in 0..size {
-        let base_z = vz * node_dim_sq;
-        let voxel_base_z = vz * size_sq;
+    #[cfg(target_arch = "wasm32")]
+    fill_voxels(
+        &mut voxel_grid,
+        &sign_grid,
+        size,
+        node_dim,
+        node_dim_sq,
+        size_sq,
+        packed_color,
+    );
 
-        for vy in 0..size {
-            let base_y = base_z + vy * node_dim;
-            let voxel_base_y = voxel_base_z + vy * size;
-
-            for vx in 0..size {
-                let base = base_y + vx;
-
-                let s000 = sign_grid[base];
-                let s100 = sign_grid[base + 1];
-                let s010 = sign_grid[base + node_dim];
-                let s110 = sign_grid[base + node_dim + 1];
-                let s001 = sign_grid[base + node_dim_sq];
-                let s101 = sign_grid[base + node_dim_sq + 1];
-                let s011 = sign_grid[base + node_dim_sq + node_dim];
-                let s111 = sign_grid[base + node_dim_sq + node_dim + 1];
-
-                let has_pos = s000 >= 0
-                    || s100 >= 0
-                    || s010 >= 0
-                    || s110 >= 0
-                    || s001 >= 0
-                    || s101 >= 0
-                    || s011 >= 0
-                    || s111 >= 0;
-                let has_neg = s000 < 0
-                    || s100 < 0
-                    || s010 < 0
-                    || s110 < 0
-                    || s001 < 0
-                    || s101 < 0
-                    || s011 < 0
-                    || s111 < 0;
-
-                if has_pos && has_neg {
-                    voxel_grid[voxel_base_y + vx] = packed_color;
-                }
-            }
-        }
-    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fill_voxels_par(
+        &mut voxel_grid,
+        &sign_grid,
+        size,
+        node_dim,
+        node_dim_sq,
+        size_sq,
+        packed_color,
+    );
 
     let voxel_fill_ms = fill_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -237,9 +215,6 @@ fn compute_sign_grid_par(
 ) {
     use rayon::prelude::*;
 
-    let chunk_count = std::cmp::min(num_cpus::get(), node_dim);
-    let chunk_size = (node_dim as f64 / chunk_count as f64).ceil() as usize;
-
     let x0 = -world_half_extent + dim.world_offset.0;
     let y0 = -world_half_extent + dim.world_offset.1;
     let z0 = -world_half_extent + dim.world_offset.2;
@@ -254,37 +229,170 @@ fn compute_sign_grid_par(
     let mut expr = expr.clone();
     expr.pre_eval(&base_vars_options);
 
-    let results: Vec<Vec<(usize, i8)>> = (0..node_dim)
-        .collect::<Vec<_>>()
-        .par_chunks(chunk_size)
-        .map(|z_range| {
-            let mut vars = base_vars.clone();
-            let mut local_signs = Vec::with_capacity(z_range.len() * node_dim * node_dim);
+    let total = node_dim * node_dim_sq;
+    let num_threads = num_cpus::get();
+    let chunk_size = total.div_ceil(num_threads);
 
-            for &nz in z_range {
+    sign_grid
+        .par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let start = chunk_idx * chunk_size;
+            let start_nz = start / node_dim_sq;
+            let start_ny = (start % node_dim_sq) / node_dim;
+            let start_nx = start % node_dim;
+
+            let mut vars = base_vars.clone();
+            let mut nz = start_nz;
+            let mut ny = start_ny;
+            let mut nx = start_nx;
+
+            for cell in chunk.iter_mut() {
+                let fx = x0 + nx as f64 * step;
+                let fy = y0 + ny as f64 * step;
                 let fz = z0 + nz as f64 * step;
+                vars[dim.x_dim] = fx;
+                vars[dim.y_dim] = fy;
                 vars[dim.z_dim] = fz;
-                for ny in 0..node_dim {
-                    let fy = y0 + ny as f64 * step;
-                    vars[dim.y_dim] = fy;
-                    for nx in 0..node_dim {
-                        let fx = x0 + nx as f64 * step;
-                        vars[dim.x_dim] = fx;
-                        let sign = eval_sign(expr.eval(&vars));
-                        let idx = nx + ny * node_dim + nz * node_dim_sq;
-                        local_signs.push((idx, sign));
+                *cell = eval_sign(expr.eval(&vars));
+
+                nx += 1;
+                if nx == node_dim {
+                    nx = 0;
+                    ny += 1;
+                    if ny == node_dim {
+                        ny = 0;
+                        nz += 1;
                     }
                 }
             }
-            local_signs
-        })
-        .collect();
+        });
+}
 
-    for chunk in results {
-        for (idx, sign) in chunk {
-            sign_grid[idx] = sign;
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn fill_voxels(
+    voxel_grid: &mut [u32],
+    sign_grid: &[i8],
+    size: usize,
+    node_dim: usize,
+    node_dim_sq: usize,
+    size_sq: usize,
+    packed_color: u32,
+) {
+    for vz in 0..size {
+        let base_z = vz * node_dim_sq;
+        let voxel_base_z = vz * size_sq;
+
+        for vy in 0..size {
+            let base_y = base_z + vy * node_dim;
+            let voxel_base_y = voxel_base_z + vy * size;
+
+            for vx in 0..size {
+                let base = base_y + vx;
+
+                let s000 = sign_grid[base];
+                let s100 = sign_grid[base + 1];
+                let s010 = sign_grid[base + node_dim];
+                let s110 = sign_grid[base + node_dim + 1];
+                let s001 = sign_grid[base + node_dim_sq];
+                let s101 = sign_grid[base + node_dim_sq + 1];
+                let s011 = sign_grid[base + node_dim_sq + node_dim];
+                let s111 = sign_grid[base + node_dim_sq + node_dim + 1];
+
+                let has_pos = s000 >= 0
+                    || s100 >= 0
+                    || s010 >= 0
+                    || s110 >= 0
+                    || s001 >= 0
+                    || s101 >= 0
+                    || s011 >= 0
+                    || s111 >= 0;
+                let has_neg = s000 < 0
+                    || s100 < 0
+                    || s010 < 0
+                    || s110 < 0
+                    || s001 < 0
+                    || s101 < 0
+                    || s011 < 0
+                    || s111 < 0;
+
+                if has_pos && has_neg {
+                    voxel_grid[voxel_base_y + vx] = packed_color;
+                }
+            }
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fill_voxels_par(
+    voxel_grid: &mut [u32],
+    sign_grid: &[i8],
+    size: usize,
+    node_dim: usize,
+    node_dim_sq: usize,
+    size_sq: usize,
+    packed_color: u32,
+) {
+    use rayon::prelude::*;
+
+    let total_voxels = size * size_sq;
+    let num_threads = num_cpus::get();
+    let chunk_size = total_voxels.div_ceil(num_threads);
+
+    voxel_grid
+        .par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let start_linear = chunk_idx * chunk_size;
+            let mut vz = start_linear / size_sq;
+            let mut vy = (start_linear % size_sq) / size;
+            let mut vx = start_linear % size;
+
+            for cell in chunk.iter_mut() {
+                let base = vx + vy * node_dim + vz * node_dim_sq;
+
+                let s000 = sign_grid[base];
+                let s100 = sign_grid[base + 1];
+                let s010 = sign_grid[base + node_dim];
+                let s110 = sign_grid[base + node_dim + 1];
+                let s001 = sign_grid[base + node_dim_sq];
+                let s101 = sign_grid[base + node_dim_sq + 1];
+                let s011 = sign_grid[base + node_dim_sq + node_dim];
+                let s111 = sign_grid[base + node_dim_sq + node_dim + 1];
+
+                let has_pos = s000 >= 0
+                    || s100 >= 0
+                    || s010 >= 0
+                    || s110 >= 0
+                    || s001 >= 0
+                    || s101 >= 0
+                    || s011 >= 0
+                    || s111 >= 0;
+                let has_neg = s000 < 0
+                    || s100 < 0
+                    || s010 < 0
+                    || s110 < 0
+                    || s001 < 0
+                    || s101 < 0
+                    || s011 < 0
+                    || s111 < 0;
+
+                if has_pos && has_neg {
+                    *cell = packed_color;
+                }
+
+                vx += 1;
+                if vx == size {
+                    vx = 0;
+                    vy += 1;
+                    if vy == size {
+                        vy = 0;
+                        vz += 1;
+                    }
+                }
+            }
+        });
 }
 
 #[cfg(test)]

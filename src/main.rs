@@ -203,7 +203,6 @@ struct GenerationTimings {
     voxel_fill_ms: f64,
 }
 
-type Grid = Vec<u32>;
 type MeshData = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<u32>);
 
 const FACE_DEFS: [(Vec3Arr, CornerArr, IVec3Arr); 6] = [
@@ -293,7 +292,7 @@ fn decode_color(packed: u32) -> LinearRgba {
 
 #[inline]
 fn is_occupied(
-    grid: &Grid,
+    composite: &[u32],
     x: i32,
     y: i32,
     z: i32,
@@ -304,7 +303,7 @@ fn is_occupied(
     {
         return false;
     }
-    grid[grid_index(x as usize, y as usize, z as usize, grid_size_usize)] != 0
+    composite[grid_index(x as usize, y as usize, z as usize, grid_size_usize)] != 0
 }
 
 fn validate_expression(expr_str: &str, dim_mapping: &DimMapping) -> Result<(), String> {
@@ -390,7 +389,7 @@ fn setup(
         .id();
 
     let total_start = Instant::now();
-    let (grids, voxel_count, gen_timings) =
+    let (composite, voxel_count, gen_timings) =
         generate_voxels(&grid_config, &expr_config, &mut expr_status, &dim_mapping);
     grid_config.voxel_count = voxel_count;
     let mut mesh = Mesh::new(
@@ -403,7 +402,7 @@ fn setup(
     #[cfg(target_arch = "wasm32")]
     build_batched_mesh_with_global_corner_ambient_occlusion(
         &mut mesh,
-        &grids,
+        &composite,
         &grid_config,
         voxel_count,
     );
@@ -411,7 +410,7 @@ fn setup(
     #[cfg(not(target_arch = "wasm32"))]
     build_batched_mesh_with_global_corner_ambient_occlusion_par(
         &mut mesh,
-        &grids,
+        &composite,
         &grid_config,
         voxel_count,
     );
@@ -458,7 +457,7 @@ fn generate_voxels(
     expr_config: &ExpressionConfig,
     expr_status: &mut ExpressionStatus,
     dim_mapping: &DimMapping,
-) -> (Vec<Grid>, usize, GenerationTimings) {
+) -> (Vec<u32>, usize, GenerationTimings) {
     let size_usize = grid_config.size as usize;
     let half_extent = (grid_config.size as f64) / 2.0 * grid_config.voxel_size;
 
@@ -526,11 +525,17 @@ fn generate_voxels(
         }
     }
 
-    let mut rendered_voxel_count = 0;
     let total_positions = size_usize.pow(3);
+    let mut composite = vec![0u32; total_positions];
+    let mut rendered_voxel_count = 0;
     for idx in 0..total_positions {
-        if grids.iter().any(|grid| grid[idx] != 0) {
-            rendered_voxel_count += 1;
+        for grid in &grids {
+            let val = grid[idx];
+            if val != 0 {
+                composite[idx] = val;
+                rendered_voxel_count += 1;
+                break;
+            }
         }
     }
 
@@ -544,13 +549,13 @@ fn generate_voxels(
         expr_status.is_valid = true;
     }
 
-    (grids, rendered_voxel_count, timings)
+    (composite, rendered_voxel_count, timings)
 }
 
 fn process_x_range_multi(
     x_start: u32,
     x_end: u32,
-    grids: &[Grid],
+    composite: &[u32],
     size: u32,
     voxel_count: usize,
 ) -> MeshData {
@@ -567,49 +572,47 @@ fn process_x_range_multi(
             for z in 0..size {
                 let idx = grid_index(x as usize, y as usize, z as usize, size_usize);
 
-                // Find first non-zero voxel value across all grids (priority by order)
-                let voxel_val = grids
-                    .iter()
-                    .map(|grid| grid[idx])
-                    .find(|&v| v != 0)
-                    .unwrap_or(0);
-
+                let voxel_val = composite[idx];
                 if voxel_val == 0 {
+                    continue;
+                }
+
+                // Skip interior voxels with all 6 faces occluded
+                let all_occluded = FACE_DEFS.iter().all(|(_, _, off)| {
+                    is_occupied(
+                        composite,
+                        x as i32 + off[0],
+                        y as i32 + off[1],
+                        z as i32 + off[2],
+                        size_i32,
+                        size_usize,
+                    )
+                });
+                if all_occluded {
                     continue;
                 }
 
                 let base_linear = decode_color(voxel_val);
                 let offset = Vec3::new(x as f32, y as f32, z as f32);
 
-                // Compute ambient occlusion using composite occupancy
                 let mut corner_ambient_occlusion = [1.0f32; 8];
-                for cx_off in 0..2 {
-                    for cy_off in 0..2 {
-                        for cz_off in 0..2 {
+                for cx_off in 0..2usize {
+                    for cy_off in 0..2usize {
+                        for cz_off in 0..2usize {
                             let corner_idx = cx_off | (cy_off << 1) | (cz_off << 2);
                             let cx = x as i32 + cx_off as i32;
                             let cy = y as i32 + cy_off as i32;
                             let cz = z as i32 + cz_off as i32;
 
                             let mut occlusion = 0;
-                            // Check occupancy across all grids for each axis
-                            for grid in grids {
-                                if is_occupied(grid, cx - 1, cy, cz, size_i32, size_usize) {
-                                    occlusion += 1;
-                                    break;
-                                }
+                            if is_occupied(composite, cx - 1, cy, cz, size_i32, size_usize) {
+                                occlusion += 1;
                             }
-                            for grid in grids {
-                                if is_occupied(grid, cx, cy - 1, cz, size_i32, size_usize) {
-                                    occlusion += 1;
-                                    break;
-                                }
+                            if is_occupied(composite, cx, cy - 1, cz, size_i32, size_usize) {
+                                occlusion += 1;
                             }
-                            for grid in grids {
-                                if is_occupied(grid, cx, cy, cz - 1, size_i32, size_usize) {
-                                    occlusion += 1;
-                                    break;
-                                }
+                            if is_occupied(composite, cx, cy, cz - 1, size_i32, size_usize) {
+                                occlusion += 1;
                             }
                             corner_ambient_occlusion[corner_idx] =
                                 AMBIENT_OCCLUSION_FACTORS[occlusion];
@@ -622,12 +625,7 @@ fn process_x_range_multi(
                     let ny = y as i32 + neighbor_offset[1];
                     let nz = z as i32 + neighbor_offset[2];
 
-                    // Check if neighbor is occupied by any function
-                    let neighbor_occupied = grids
-                        .iter()
-                        .any(|grid| is_occupied(grid, nx, ny, nz, size_i32, size_usize));
-
-                    if neighbor_occupied {
+                    if is_occupied(composite, nx, ny, nz, size_i32, size_usize) {
                         continue;
                     }
 
@@ -710,14 +708,14 @@ fn process_x_range_multi(
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn build_batched_mesh_with_global_corner_ambient_occlusion(
     mesh: &mut Mesh,
-    grids: &[Grid],
+    composite: &[u32],
     grid_config: &GridConfig,
     voxel_count: usize,
 ) {
     info!("voxel_count: {}", voxel_count);
     let size = grid_config.size;
     let (positions, normals, colors, indices) =
-        process_x_range_multi(0, size, grids, size, voxel_count);
+        process_x_range_multi(0, size, composite, size, voxel_count);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
@@ -727,7 +725,7 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion(
 #[cfg(not(target_arch = "wasm32"))]
 fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
     mesh: &mut Mesh,
-    grids: &[Grid],
+    composite: &[u32],
     grid_config: &GridConfig,
     voxel_count: usize,
 ) {
@@ -742,7 +740,7 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
         .map(|x_range| {
             let x_start = x_range[0];
             let x_end = x_range[x_range.len() - 1] + 1;
-            process_x_range_multi(x_start, x_end, grids, size, voxel_count_per_chunk)
+            process_x_range_multi(x_start, x_end, composite, size, voxel_count_per_chunk)
         })
         .collect();
 
@@ -1371,7 +1369,7 @@ fn egui_ui_system(
 
     if should_regenerate {
         let total_start = Instant::now();
-        let (grids, count, gen_timings) =
+        let (composite, count, gen_timings) =
             generate_voxels(&grid_config, &expr_config, &mut expr_status, &dim_mapping);
         grid_config.voxel_count = count;
 
@@ -1384,7 +1382,7 @@ fn egui_ui_system(
         #[cfg(target_arch = "wasm32")]
         build_batched_mesh_with_global_corner_ambient_occlusion(
             &mut mesh,
-            &grids,
+            &composite,
             &grid_config,
             count,
         );
@@ -1392,7 +1390,7 @@ fn egui_ui_system(
         #[cfg(not(target_arch = "wasm32"))]
         build_batched_mesh_with_global_corner_ambient_occlusion_par(
             &mut mesh,
-            &grids,
+            &composite,
             &grid_config,
             count,
         );
