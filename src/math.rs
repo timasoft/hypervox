@@ -1,6 +1,18 @@
 use crate::DimMapping;
 use crate::expr;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
+/// Per-phase timing for grid generation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GridTimings {
+    pub sign_grid_ms: f64,
+    pub voxel_fill_ms: f64,
+}
+
 /// Configuration for N-dimensional to 3D spatial mapping.
 /// Maps N dimensions (0..ndim) to 3D spatial axes (X, Y, Z).
 /// Dimensions not mapped to any axis are held at fixed values.
@@ -37,9 +49,9 @@ pub fn generate_voxel_grid(
     base_color: u32,
     world_half_extent: f64,
     dim: &DimConfig,
-) -> Result<Vec<u32>, String> {
+) -> Result<(Vec<u32>, GridTimings), String> {
     if size == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), GridTimings::default()));
     }
 
     if dim.x_dim >= dim.ndim || dim.y_dim >= dim.ndim || dim.z_dim >= dim.ndim {
@@ -60,6 +72,8 @@ pub fn generate_voxel_grid(
 
     let step = (world_half_extent * 2.0) / size as f64;
     let packed_color = (base_color & 0xFFFFFF).wrapping_add(1);
+
+    let sign_start = Instant::now();
 
     #[cfg(target_arch = "wasm32")]
     compute_sign_grid(
@@ -82,6 +96,10 @@ pub fn generate_voxel_grid(
         world_half_extent,
         dim,
     );
+
+    let sign_grid_ms = sign_start.elapsed().as_secs_f64() * 1000.0;
+
+    let fill_start = Instant::now();
 
     for vz in 0..size {
         let base_z = vz * node_dim_sq;
@@ -127,7 +145,15 @@ pub fn generate_voxel_grid(
         }
     }
 
-    Ok(voxel_grid)
+    let voxel_fill_ms = fill_start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok((
+        voxel_grid,
+        GridTimings {
+            sign_grid_ms,
+            voxel_fill_ms,
+        },
+    ))
 }
 
 #[inline]
@@ -269,7 +295,8 @@ mod tests {
     fn test_sphere_generation() {
         // Sphere of radius 2 in region [-5, 5]
         let dim = DimConfig::default();
-        let grid = generate_voxel_grid(32, "x^2 + y^2 + z^2 - 4", 0xFF0000, 5.0, &dim).unwrap();
+        let (grid, _) =
+            generate_voxel_grid(32, "x^2 + y^2 + z^2 - 4", 0xFF0000, 5.0, &dim).unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
         assert!(filled > 0 && filled < grid.len());
     }
@@ -278,7 +305,8 @@ mod tests {
     fn test_sinusoidal_surface() {
         // Test that sin function works
         let dim = DimConfig::default();
-        let grid = generate_voxel_grid(16, "sin(x) + cos(y) + z", 0x00FF00, 8.0, &dim).unwrap();
+        let (grid, _) =
+            generate_voxel_grid(16, "sin(x) + cos(y) + z", 0x00FF00, 8.0, &dim).unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
         // Should generate some voxels, but not all
         assert!(filled > 0 && filled < grid.len());
@@ -298,7 +326,7 @@ mod tests {
         };
         // x1^2 + x2^2 + x3^2 - x0^2 (sphere with radius x0)
         // with x3 mapped to Z, x0 fixed at 0.0 → radius 0 → no sphere
-        let grid =
+        let (grid, _) =
             generate_voxel_grid(16, "x1^2 + x2^2 + x3^2 - x0^2", 0x00FF00, 8.0, &dim).unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
         assert_eq!(filled, 0);

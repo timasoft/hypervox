@@ -14,6 +14,11 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
 use crate::math::DimConfig;
 
 mod expr;
@@ -119,18 +124,19 @@ struct SceneEntities {
 }
 
 #[derive(Resource)]
-struct CameraRotation {
+struct CameraState {
     angle: f32,
     speed: f32,
+    mode: CameraMode,
 }
 
-#[derive(Resource, PartialEq)]
+#[derive(PartialEq, Eq)]
 enum CameraMode {
     AutoOrbit,
     Manual,
 }
 
-#[derive(Resource, Clone, PartialEq)]
+#[derive(Resource, Clone, PartialEq, Eq)]
 struct ShowAxesPlanes {
     show_axes: bool,
     show_ground_grid: bool,
@@ -180,6 +186,21 @@ impl Default for ExpressionConfig {
 struct ExpressionStatus {
     is_valid: bool,
     errors: Vec<String>,
+}
+
+#[derive(Resource, Default)]
+struct ProfilingData {
+    parse_ms: f64,
+    sign_grid_ms: f64,
+    voxel_fill_ms: f64,
+    mesh_build_ms: f64,
+    total_ms: f64,
+}
+
+struct GenerationTimings {
+    parse_ms: f64,
+    sign_grid_ms: f64,
+    voxel_fill_ms: f64,
 }
 
 type Grid = Vec<u32>;
@@ -368,13 +389,16 @@ fn setup(
         ))
         .id();
 
-    let (grids, voxel_count) =
+    let total_start = Instant::now();
+    let (grids, voxel_count, gen_timings) =
         generate_voxels(&grid_config, &expr_config, &mut expr_status, &dim_mapping);
     grid_config.voxel_count = voxel_count;
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
+
+    let mesh_start = Instant::now();
 
     #[cfg(target_arch = "wasm32")]
     build_batched_mesh_with_global_corner_ambient_occlusion(
@@ -391,6 +415,17 @@ fn setup(
         &grid_config,
         voxel_count,
     );
+
+    let mesh_build_ms = mesh_start.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+    commands.insert_resource(ProfilingData {
+        parse_ms: gen_timings.parse_ms,
+        sign_grid_ms: gen_timings.sign_grid_ms,
+        voxel_fill_ms: gen_timings.voxel_fill_ms,
+        mesh_build_ms,
+        total_ms,
+    });
 
     let mesh_handle = meshes.add(mesh);
 
@@ -411,11 +446,11 @@ fn setup(
         camera: cam_entity,
         voxel_mesh: mesh_entity,
     });
-    commands.insert_resource(CameraRotation {
+    commands.insert_resource(CameraState {
         angle: 0.0,
         speed: 0.5,
+        mode: CameraMode::AutoOrbit,
     });
-    commands.insert_resource(CameraMode::AutoOrbit);
 }
 
 fn generate_voxels(
@@ -423,9 +458,15 @@ fn generate_voxels(
     expr_config: &ExpressionConfig,
     expr_status: &mut ExpressionStatus,
     dim_mapping: &DimMapping,
-) -> (Vec<Grid>, usize) {
+) -> (Vec<Grid>, usize, GenerationTimings) {
     let size_usize = grid_config.size as usize;
     let half_extent = (grid_config.size as f64) / 2.0 * grid_config.voxel_size;
+
+    let mut timings = GenerationTimings {
+        parse_ms: 0.0,
+        sign_grid_ms: 0.0,
+        voxel_fill_ms: 0.0,
+    };
 
     expr_status.errors.clear();
 
@@ -437,7 +478,9 @@ fn generate_voxels(
             continue;
         }
 
+        let parse_start = Instant::now();
         if let Err(e) = validate_expression(&entry.expr, dim_mapping) {
+            timings.parse_ms += parse_start.elapsed().as_secs_f64() * 1000.0;
             expr_status.is_valid = false;
             expr_status
                 .errors
@@ -445,10 +488,12 @@ fn generate_voxels(
             grids.push(vec![0; size_usize.pow(3)]);
             continue;
         }
+        timings.parse_ms += parse_start.elapsed().as_secs_f64() * 1000.0;
 
         let base_color =
             ((entry.color.0 as u32) << 16) | ((entry.color.1 as u32) << 8) | (entry.color.2 as u32);
 
+        let gen_start = Instant::now();
         match math::generate_voxel_grid(
             size_usize,
             &entry.expr,
@@ -456,10 +501,13 @@ fn generate_voxels(
             half_extent,
             &dim_mapping.into(),
         ) {
-            Ok(grid) => {
+            Ok((grid, grid_timings)) => {
+                timings.sign_grid_ms += grid_timings.sign_grid_ms;
+                timings.voxel_fill_ms += grid_timings.voxel_fill_ms;
                 grids.push(grid);
             }
             Err(e) => {
+                timings.sign_grid_ms += gen_start.elapsed().as_secs_f64() * 1000.0;
                 error!(
                     "Error evaluating expression #{} '{}': {}",
                     idx + 1,
@@ -496,7 +544,7 @@ fn generate_voxels(
         expr_status.is_valid = true;
     }
 
-    (grids, rendered_voxel_count)
+    (grids, rendered_voxel_count, timings)
 }
 
 fn process_x_range_multi(
@@ -808,23 +856,22 @@ fn draw_axes_and_planes(
 
 fn rotate_camera(
     time: Res<Time>,
-    mut rotation: ResMut<CameraRotation>,
+    mut camera: ResMut<CameraState>,
     mut query_camera: Query<&mut Transform, With<Camera3d>>,
     grid_config: Res<GridConfig>,
-    camera_mode: Res<CameraMode>,
 ) {
-    if *camera_mode != CameraMode::AutoOrbit {
+    if camera.mode != CameraMode::AutoOrbit {
         return;
     }
-    rotation.angle += time.delta_secs() * rotation.speed;
+    camera.angle += time.delta_secs() * camera.speed;
     let center = grid_config.center();
     let radius = grid_config.camera_radius();
     let height = grid_config.camera_height();
     for mut t in query_camera.iter_mut() {
         t.translation = Vec3::new(
-            center.x + radius * rotation.angle.cos(),
+            center.x + radius * camera.angle.cos(),
             center.y + height,
-            center.z + radius * rotation.angle.sin(),
+            center.z + radius * camera.angle.sin(),
         );
         t.look_at(center, Vec3::Y);
     }
@@ -850,17 +897,17 @@ fn egui_ui_system(
     diagnostics: Res<DiagnosticsStore>,
     mut grid_config: ResMut<GridConfig>,
     mut dim_mapping: ResMut<DimMapping>,
-    mut camera_mode: ResMut<CameraMode>,
+    mut camera: ResMut<CameraState>,
     mut query_cam: Query<&mut PanOrbitCamera>,
     mut auto_regen: ResMut<RegenerateEveryFrame>,
     mut regenerate_request: Local<bool>,
     mut expr_config: ResMut<ExpressionConfig>,
     mut expr_status: ResMut<ExpressionStatus>,
     entities: Res<SceneEntities>,
-    rotation: Res<CameraRotation>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut query_cam_transform: Query<&mut Transform>,
+    mut profiling: ResMut<ProfilingData>,
 ) {
     let Ok(ctx) = egui_contexts.ctx_mut() else {
         return;
@@ -1238,13 +1285,13 @@ fn egui_ui_system(
                 }
             });
 
-            let cam_label = match *camera_mode {
+            let cam_label = match camera.mode {
                 CameraMode::AutoOrbit => "Camera: Auto",
                 CameraMode::Manual => "Camera: Manual",
             };
             if ui.button(cam_label).clicked() {
                 let center = grid_config.center();
-                *camera_mode = match *camera_mode {
+                camera.mode = match camera.mode {
                     CameraMode::AutoOrbit => {
                         for mut poc in &mut query_cam {
                             poc.enabled = true;
@@ -1287,13 +1334,44 @@ fn egui_ui_system(
                 "Fill: {:.1}%",
                 (grid_config.voxel_count as f32 / (grid_config.size.pow(3) as f32)) * 100.0
             ));
+
+            ui.separator();
+            ui.label("Regeneration Timing:");
+            let total = profiling.total_ms;
+            if total > 0.0 {
+                ui.label(format!(
+                    "  Parse:     {:.1} ms  ({:.0}%)",
+                    profiling.parse_ms,
+                    profiling.parse_ms / total * 100.0
+                ));
+                ui.label(format!(
+                    "  Sign grid: {:.1} ms  ({:.0}%)",
+                    profiling.sign_grid_ms,
+                    profiling.sign_grid_ms / total * 100.0
+                ));
+                ui.label(format!(
+                    "  Voxel fill: {:.1} ms  ({:.0}%)",
+                    profiling.voxel_fill_ms,
+                    profiling.voxel_fill_ms / total * 100.0
+                ));
+                ui.label(format!(
+                    "  Mesh build: {:.1} ms  ({:.0}%)",
+                    profiling.mesh_build_ms,
+                    profiling.mesh_build_ms / total * 100.0
+                ));
+                ui.label("  -----------------");
+                ui.label(format!("  Total:     {:.1} ms", total));
+            } else {
+                ui.label("  (waiting for generation...)");
+            }
         });
 
     let should_regenerate = *regenerate_request || auto_regen.enabled;
     *regenerate_request = false;
 
     if should_regenerate {
-        let (grids, count) =
+        let total_start = Instant::now();
+        let (grids, count, gen_timings) =
             generate_voxels(&grid_config, &expr_config, &mut expr_status, &dim_mapping);
         grid_config.voxel_count = count;
 
@@ -1302,6 +1380,7 @@ fn egui_ui_system(
             RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
         );
 
+        let mesh_start = Instant::now();
         #[cfg(target_arch = "wasm32")]
         build_batched_mesh_with_global_corner_ambient_occlusion(
             &mut mesh,
@@ -1317,6 +1396,14 @@ fn egui_ui_system(
             &grid_config,
             count,
         );
+        let mesh_build_ms = mesh_start.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+        profiling.parse_ms = gen_timings.parse_ms;
+        profiling.sign_grid_ms = gen_timings.sign_grid_ms;
+        profiling.voxel_fill_ms = gen_timings.voxel_fill_ms;
+        profiling.mesh_build_ms = mesh_build_ms;
+        profiling.total_ms = total_ms;
 
         commands
             .entity(entities.voxel_mesh)
@@ -1331,11 +1418,11 @@ fn egui_ui_system(
             })));
 
         let center = grid_config.center();
-        match *camera_mode {
+        match camera.mode {
             CameraMode::AutoOrbit => {
                 let radius = grid_config.camera_radius();
                 let height = grid_config.camera_height();
-                let angle = rotation.angle;
+                let angle = camera.angle;
                 commands.entity(entities.camera).insert(
                     Transform::from_xyz(
                         center.x + radius * angle.cos(),
