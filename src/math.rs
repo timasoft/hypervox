@@ -182,6 +182,7 @@ fn compute_sign_grid(
 
     let mut expr = expr.clone();
     expr.pre_eval(&vars_options);
+    let compiled_expr = expr.compile();
 
     let x0 = -world_half_extent + dim.world_offset.0;
     let y0 = -world_half_extent + dim.world_offset.1;
@@ -197,7 +198,7 @@ fn compute_sign_grid(
                 let fx = x0 + nx as f64 * step;
                 vars[dim.x_dim] = fx;
                 let idx = nx + ny * node_dim + nz * node_dim_sq;
-                sign_grid[idx] = eval_sign(expr.eval(&vars));
+                sign_grid[idx] = eval_sign(compiled_expr(&vars));
             }
         }
     }
@@ -228,6 +229,7 @@ fn compute_sign_grid_par(
 
     let mut expr = expr.clone();
     expr.pre_eval(&base_vars_options);
+    let compiled_expr = expr.compile();
 
     let total = node_dim * node_dim_sq;
     let num_threads = num_cpus::get();
@@ -254,7 +256,7 @@ fn compute_sign_grid_par(
                 vars[dim.x_dim] = fx;
                 vars[dim.y_dim] = fy;
                 vars[dim.z_dim] = fz;
-                *cell = eval_sign(expr.eval(&vars));
+                *cell = eval_sign(compiled_expr(&vars));
 
                 nx += 1;
                 if nx == node_dim {

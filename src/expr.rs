@@ -16,6 +16,8 @@ pub enum Node {
     F2(F2, Box<Node>, Box<Node>),
 }
 
+pub type CompiledExpr = Box<dyn Fn(&[f64]) -> f64 + Send + Sync>;
+
 #[derive(Debug, Clone, Copy)]
 pub enum F0 {
     PI,
@@ -305,61 +307,99 @@ impl Node {
         }
     }
 
-    pub fn eval(&self, vars: &[f64]) -> f64 {
+    pub fn compile(&self) -> CompiledExpr {
         match self {
-            Node::Num(v) => *v,
-            Node::Var(i) => vars[*i],
-            Node::Neg(a) => -a.eval(vars),
-            Node::Add(a, b) => a.eval(vars) + b.eval(vars),
-            Node::Sub(a, b) => a.eval(vars) - b.eval(vars),
-            Node::Mul(a, b) => a.eval(vars) * b.eval(vars),
-            Node::Div(a, b) => a.eval(vars) / b.eval(vars),
+            Node::Num(v) => {
+                let v = *v;
+                Box::new(move |_| v)
+            }
+            Node::Var(i) => {
+                let i = *i;
+                Box::new(move |vars: &[f64]| vars[i])
+            }
+            Node::Neg(a) => {
+                let a_fn = a.compile();
+                Box::new(move |vars: &[f64]| -a_fn(vars))
+            }
+            Node::Add(a, b) => {
+                let a_fn = a.compile();
+                let b_fn = b.compile();
+                Box::new(move |vars: &[f64]| a_fn(vars) + b_fn(vars))
+            }
+            Node::Sub(a, b) => {
+                let a_fn = a.compile();
+                let b_fn = b.compile();
+                Box::new(move |vars: &[f64]| a_fn(vars) - b_fn(vars))
+            }
+            Node::Mul(a, b) => {
+                let a_fn = a.compile();
+                let b_fn = b.compile();
+                Box::new(move |vars: &[f64]| a_fn(vars) * b_fn(vars))
+            }
+            Node::Div(a, b) => {
+                let a_fn = a.compile();
+                let b_fn = b.compile();
+                Box::new(move |vars: &[f64]| a_fn(vars) / b_fn(vars))
+            }
             Node::Pow(a, b) => {
-                let base = a.eval(vars);
-                let exp = b.eval(vars);
-                if base == 0.0 && exp == 0.0 {
-                    1.0
-                } else {
-                    base.powf(exp)
-                }
-            }
-            Node::F1(f, a) => {
-                let v = a.eval(vars);
-                match f {
-                    F1::Sin => v.sin(),
-                    F1::Cos => v.cos(),
-                    F1::Tan => v.tan(),
-                    F1::Asin => v.asin(),
-                    F1::Acos => v.acos(),
-                    F1::Atan => v.atan(),
-                    F1::Sinh => v.sinh(),
-                    F1::Cosh => v.cosh(),
-                    F1::Tanh => v.tanh(),
-                    F1::Sqrt => v.sqrt(),
-                    F1::Cbrt => v.cbrt(),
-                    F1::Exp => v.exp(),
-                    F1::Ln => v.ln(),
-                    F1::Log10 => v.log10(),
-                    F1::Log2 => v.log2(),
-                    F1::Floor => v.floor(),
-                    F1::Ceil => v.ceil(),
-                    F1::Round => v.round(),
-                    F1::Trunc => v.trunc(),
-                    F1::Abs => v.abs(),
-                }
-            }
-            Node::F2(f, a, b) => match f {
-                F2::Atan2 => a.eval(vars).atan2(b.eval(vars)),
-                F2::Pow => {
-                    let base = a.eval(vars);
-                    let exp = b.eval(vars);
+                let a_fn = a.compile();
+                let b_fn = b.compile();
+                Box::new(move |vars: &[f64]| {
+                    let base = a_fn(vars);
+                    let exp = b_fn(vars);
                     if base == 0.0 && exp == 0.0 {
                         1.0
                     } else {
                         base.powf(exp)
                     }
-                }
-            },
+                })
+            }
+            Node::F1(f, a) => {
+                let f = *f;
+                let a_fn = a.compile();
+                Box::new(move |vars: &[f64]| {
+                    let v = a_fn(vars);
+                    match f {
+                        F1::Sin => v.sin(),
+                        F1::Cos => v.cos(),
+                        F1::Tan => v.tan(),
+                        F1::Asin => v.asin(),
+                        F1::Acos => v.acos(),
+                        F1::Atan => v.atan(),
+                        F1::Sinh => v.sinh(),
+                        F1::Cosh => v.cosh(),
+                        F1::Tanh => v.tanh(),
+                        F1::Sqrt => v.sqrt(),
+                        F1::Cbrt => v.cbrt(),
+                        F1::Exp => v.exp(),
+                        F1::Ln => v.ln(),
+                        F1::Log10 => v.log10(),
+                        F1::Log2 => v.log2(),
+                        F1::Floor => v.floor(),
+                        F1::Ceil => v.ceil(),
+                        F1::Round => v.round(),
+                        F1::Trunc => v.trunc(),
+                        F1::Abs => v.abs(),
+                    }
+                })
+            }
+            Node::F2(f, a, b) => {
+                let f = *f;
+                let a_fn = a.compile();
+                let b_fn = b.compile();
+                Box::new(move |vars: &[f64]| match f {
+                    F2::Atan2 => a_fn(vars).atan2(b_fn(vars)),
+                    F2::Pow => {
+                        let base = a_fn(vars);
+                        let exp = b_fn(vars);
+                        if base == 0.0 && exp == 0.0 {
+                            1.0
+                        } else {
+                            base.powf(exp)
+                        }
+                    }
+                })
+            }
         }
     }
 }
@@ -782,7 +822,7 @@ mod tests {
     #[test]
     fn test_eval_basic_ops() {
         let dim = DimConfig::default();
-        let e = |s: &str| parse(s, &dim).unwrap().eval(&[]);
+        let e = |s: &str| parse(s, &dim).unwrap().compile()(&[]);
         assert_eq!(e("3 + 5"), 8.0);
         assert_eq!(e("10 - 7"), 3.0);
         assert_eq!(e("4 * 6"), 24.0);
@@ -796,7 +836,7 @@ mod tests {
     #[test]
     fn test_eval_vars_funcs_consts() {
         let dim = DimConfig::default();
-        let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().eval(v);
+        let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v);
         assert_eq!(e("x + y + z", &[1.0, 2.0, 3.0]), 6.0);
         assert_eq!(e("2 * x", &[5.0, 0.0, 0.0]), 10.0);
         assert_eq!(e("sqrt(4)", &[]), 2.0);
@@ -911,7 +951,7 @@ mod tests {
             z_dim: 3,
             ..DimConfig::default()
         };
-        let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().eval(v);
+        let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v);
         assert_eq!(e("x0", &[5.0, 0.0, 0.0, 0.0]), 5.0);
         assert_eq!(e("x3", &[0.0, 0.0, 0.0, 5.0]), 5.0);
         assert!(parse("x4", &dim).is_err());
