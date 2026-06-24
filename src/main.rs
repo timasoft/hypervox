@@ -534,9 +534,9 @@ fn generate_voxels(
     (composite, rendered_voxel_count, timings)
 }
 
-fn process_x_range_multi(
-    x_start: u32,
-    x_end: u32,
+fn process_z_range_multi(
+    z_start: u32,
+    z_end: u32,
     composite: &[u32],
     size: u32,
     voxel_count: usize,
@@ -550,9 +550,9 @@ fn process_x_range_multi(
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(voxel_count * 30);
     let mut indices: Vec<u32> = Vec::with_capacity(voxel_count * 72);
 
-    for z in 0..size {
+    for z in z_start..z_end {
         for y in 0..size {
-            for x in x_start..x_end {
+            for x in 0..size {
                 let idx = grid_index(x as usize, y as usize, z as usize, size_usize);
 
                 let voxel_val = composite[idx];
@@ -706,7 +706,7 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion(
     info!("voxel_count: {}", voxel_count);
     let size = grid_config.size;
     let (positions, normals, colors, indices) =
-        process_x_range_multi(0, size, composite, size, voxel_count);
+        process_z_range_multi(0, size, composite, size, voxel_count);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
@@ -728,10 +728,10 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
     let results: Vec<_> = (0..size)
         .collect::<Vec<_>>()
         .par_chunks(chunk_size)
-        .map(|x_range| {
-            let x_start = x_range[0];
-            let x_end = x_range[x_range.len() - 1] + 1;
-            process_x_range_multi(x_start, x_end, composite, size, voxel_count_per_chunk)
+        .map(|z_range| {
+            let z_start = z_range[0];
+            let z_end = z_range[z_range.len() - 1] + 1;
+            process_z_range_multi(z_start, z_end, composite, size, voxel_count_per_chunk)
         })
         .collect();
 
