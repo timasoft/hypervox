@@ -44,28 +44,14 @@ type IVec3Arr = [i32; 3];
 type CornerArr = [Vec3Arr; 4];
 
 const AMBIENT_OCCLUSION_FACTORS: [f32; 4] = [1.0, 0.75, 0.5, 0.3];
+const CAMERA_RADIUS: f32 = 1.5;
+const CAMERA_HEIGHT: f32 = 0.8;
 
 #[derive(Resource)]
 struct GridConfig {
     size: u32,
     voxel_size: f64,
     voxel_count: usize,
-}
-
-impl GridConfig {
-    #[inline]
-    fn center(&self) -> Vec3 {
-        let f = self.size as f32;
-        Vec3::splat(f / 2.0 - 0.5)
-    }
-    #[inline]
-    fn camera_radius(&self) -> f32 {
-        self.size as f32 * 1.5
-    }
-    #[inline]
-    fn camera_height(&self) -> f32 {
-        self.size as f32 * 0.8
-    }
 }
 
 #[derive(Resource)]
@@ -210,10 +196,10 @@ const FACE_DEFS: [(Vec3Arr, CornerArr, IVec3Arr); 6] = [
     (
         [1.0, 0.0, 0.0],
         [
-            [0.5, -0.5, -0.5],
-            [0.5, 0.5, -0.5],
-            [0.5, 0.5, 0.5],
-            [0.5, -0.5, 0.5],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
         ],
         [1, 0, 0],
     ),
@@ -221,10 +207,10 @@ const FACE_DEFS: [(Vec3Arr, CornerArr, IVec3Arr); 6] = [
     (
         [-1.0, 0.0, 0.0],
         [
-            [-0.5, -0.5, 0.5],
-            [-0.5, 0.5, 0.5],
-            [-0.5, 0.5, -0.5],
-            [-0.5, -0.5, -0.5],
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
         ],
         [-1, 0, 0],
     ),
@@ -232,10 +218,10 @@ const FACE_DEFS: [(Vec3Arr, CornerArr, IVec3Arr); 6] = [
     (
         [0.0, 1.0, 0.0],
         [
-            [-0.5, 0.5, -0.5],
-            [-0.5, 0.5, 0.5],
-            [0.5, 0.5, 0.5],
-            [0.5, 0.5, -0.5],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0],
         ],
         [0, 1, 0],
     ),
@@ -243,10 +229,10 @@ const FACE_DEFS: [(Vec3Arr, CornerArr, IVec3Arr); 6] = [
     (
         [0.0, -1.0, 0.0],
         [
-            [-0.5, -0.5, -0.5],
-            [0.5, -0.5, -0.5],
-            [0.5, -0.5, 0.5],
-            [-0.5, -0.5, 0.5],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
         ],
         [0, -1, 0],
     ),
@@ -254,10 +240,10 @@ const FACE_DEFS: [(Vec3Arr, CornerArr, IVec3Arr); 6] = [
     (
         [0.0, 0.0, 1.0],
         [
-            [-0.5, -0.5, 0.5],
-            [0.5, -0.5, 0.5],
-            [0.5, 0.5, 0.5],
-            [-0.5, 0.5, 0.5],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
         ],
         [0, 0, 1],
     ),
@@ -265,10 +251,10 @@ const FACE_DEFS: [(Vec3Arr, CornerArr, IVec3Arr); 6] = [
     (
         [0.0, 0.0, -1.0],
         [
-            [-0.5, -0.5, -0.5],
-            [-0.5, 0.5, -0.5],
-            [0.5, 0.5, -0.5],
-            [0.5, -0.5, -0.5],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
         ],
         [0, 0, -1],
     ),
@@ -364,25 +350,21 @@ fn setup(
     expr_config: Res<ExpressionConfig>,
     dim_mapping: Res<DimMapping>,
 ) {
-    let center = grid_config.center();
-    let camera_radius = grid_config.camera_radius();
-    let camera_height = grid_config.camera_height();
-
     let cam_entity = commands
         .spawn((
             Camera3d::default(),
             Transform::from_xyz(
-                center.x + camera_radius * 0.7,
-                center.y + camera_height,
-                center.z + camera_radius * 0.7,
+                Vec3::ZERO.x + CAMERA_RADIUS * 0.7,
+                Vec3::ZERO.y + CAMERA_HEIGHT,
+                Vec3::ZERO.z + CAMERA_RADIUS * 0.7,
             )
-            .looking_at(center, Vec3::Y),
+            .looking_at(Vec3::ZERO, Vec3::Y),
             Exposure { ev100: 0.0 },
             Tonemapping::None,
             PanOrbitCamera {
                 enabled: false,
-                focus: center,
-                target_focus: center,
+                focus: Vec3::ZERO,
+                target_focus: Vec3::ZERO,
                 ..default()
             },
         ))
@@ -561,6 +543,7 @@ fn process_x_range_multi(
 ) -> MeshData {
     let size_i32 = size as i32;
     let size_usize = size as usize;
+    let inv_size = 1.0 / size as f32;
 
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(voxel_count * 30);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(voxel_count * 30);
@@ -593,7 +576,11 @@ fn process_x_range_multi(
                 }
 
                 let base_linear = decode_color(voxel_val);
-                let offset = Vec3::new(x as f32, y as f32, z as f32);
+                let offset = Vec3::new(
+                    x as f32 * inv_size - 0.5,
+                    y as f32 * inv_size - 0.5,
+                    z as f32 * inv_size - 0.5,
+                );
 
                 let mut corner_ambient_occlusion = [1.0f32; 8];
                 for cx_off in 0..2usize {
@@ -665,9 +652,9 @@ fn process_x_range_multi(
                         base_linear.alpha,
                     ];
                     let center_pos = [
-                        cx_sum / 4.0 + offset.x,
-                        cy_sum / 4.0 + offset.y,
-                        cz_sum / 4.0 + offset.z,
+                        cx_sum / 4.0 * inv_size + offset.x,
+                        cy_sum / 4.0 * inv_size + offset.y,
+                        cz_sum / 4.0 * inv_size + offset.z,
                     ];
 
                     let start_idx = positions.len() as u32;
@@ -678,7 +665,11 @@ fn process_x_range_multi(
 
                     for (i, &corner) in corners.iter().enumerate() {
                         let [cx, cy, cz] = corner;
-                        positions.push([cx + offset.x, cy + offset.y, cz + offset.z]);
+                        positions.push([
+                            cx * inv_size + offset.x,
+                            cy * inv_size + offset.y,
+                            cz * inv_size + offset.z,
+                        ]);
                         normals.push(normal);
                         colors.push(corner_colors[i]);
                     }
@@ -786,68 +777,61 @@ fn draw_axes_and_planes(
     grid_config: Res<GridConfig>,
     show: Res<ShowAxesPlanes>,
 ) {
-    let center = grid_config.center();
-    let min = -0.5;
-    let max = grid_config.size as f32 - 0.5;
+    let inv_size = 1.0 / grid_config.size as f32;
+    let n = grid_config.size;
+    let step = ((n as f32 / 32.0).round() as u32).next_power_of_two();
 
     if show.show_axes {
         gizmos.line(
-            Vec3::new(min, center.y, center.z),
-            Vec3::new(max, center.y, center.z),
+            Vec3::new(-0.5, 0.0, 0.0),
+            Vec3::new(0.5, 0.0, 0.0),
             Color::srgb(1.0, 0.2, 0.2),
         );
         gizmos.line(
-            Vec3::new(center.x, min, center.z),
-            Vec3::new(center.x, max, center.z),
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(0.0, 0.5, 0.0),
             Color::srgb(0.2, 1.0, 0.2),
         );
         gizmos.line(
-            Vec3::new(center.x, center.y, min),
-            Vec3::new(center.x, center.y, max),
+            Vec3::new(0.0, 0.0, -0.5),
+            Vec3::new(0.0, 0.0, 0.5),
             Color::srgb(0.2, 0.2, 1.0),
         );
     }
 
-    let n = grid_config.size;
-    let step = ((n as f32 / 32.0).round() as u32).next_power_of_two();
-
     if show.show_ground_grid {
-        let y = min;
         let gc = Color::srgba(0.5, 0.5, 0.5, 0.35);
 
         for i in (0..=n).step_by(step as usize) {
-            let p = i as f32 - 0.5;
-            gizmos.line(Vec3::new(min, y, p), Vec3::new(max, y, p), gc);
-            gizmos.line(Vec3::new(p, y, min), Vec3::new(p, y, max), gc);
+            let p = i as f32 * inv_size - 0.5;
+            gizmos.line(Vec3::new(-0.5, -0.5, p), Vec3::new(0.5, -0.5, p), gc);
+            gizmos.line(Vec3::new(p, -0.5, -0.5), Vec3::new(p, -0.5, 0.5), gc);
         }
     }
 
     if show.show_planes {
         // XY plane at z = center.z — red grid
-        let z = center.z;
         let cr = Color::srgba(1.0, 0.2, 0.2, 0.3);
         for i in (0..=n).step_by(step as usize) {
-            let p = i as f32 - 0.5;
-            gizmos.line(Vec3::new(min, p, z), Vec3::new(max, p, z), cr);
-            gizmos.line(Vec3::new(p, min, z), Vec3::new(p, max, z), cr);
+            let p = i as f32 * inv_size - 0.5;
+            gizmos.line(Vec3::new(-0.5, p, 0.0), Vec3::new(0.5, p, 0.0), cr);
+            gizmos.line(Vec3::new(p, -0.5, 0.0), Vec3::new(p, 0.5, 0.0), cr);
         }
 
         // XZ plane at y = center.y — green grid
-        let y = center.y;
         let cg = Color::srgba(0.2, 1.0, 0.2, 0.3);
         for i in (0..=n).step_by(step as usize) {
-            let p = i as f32 - 0.5;
-            gizmos.line(Vec3::new(min, y, p), Vec3::new(max, y, p), cg);
-            gizmos.line(Vec3::new(p, y, min), Vec3::new(p, y, max), cg);
+            let p = i as f32 * inv_size - 0.5;
+            gizmos.line(Vec3::new(-0.5, 0.0, p), Vec3::new(0.5, 0.0, p), cg);
+            gizmos.line(Vec3::new(p, 0.0, -0.5), Vec3::new(p, 0.0, 0.5), cg);
         }
 
         // YZ plane at x = center.x — blue grid
-        let x = center.x;
         let cb = Color::srgba(0.2, 0.2, 1.0, 0.3);
         for i in (0..=n).step_by(step as usize) {
-            let p = i as f32 - 0.5;
-            gizmos.line(Vec3::new(x, min, p), Vec3::new(x, max, p), cb);
-            gizmos.line(Vec3::new(x, p, min), Vec3::new(x, p, max), cb);
+            let p = i as f32 * inv_size - 0.5;
+            gizmos.line(Vec3::new(0.0, -0.5, p), Vec3::new(0.0, 0.5, p), cb);
+            gizmos.line(Vec3::new(0.0, p, -0.5), Vec3::new(0.0, p, 0.5), cb);
         }
     }
 }
@@ -856,22 +840,18 @@ fn rotate_camera(
     time: Res<Time>,
     mut camera: ResMut<CameraState>,
     mut query_camera: Query<&mut Transform, With<Camera3d>>,
-    grid_config: Res<GridConfig>,
 ) {
     if camera.mode != CameraMode::AutoOrbit {
         return;
     }
     camera.angle += time.delta_secs() * camera.speed;
-    let center = grid_config.center();
-    let radius = grid_config.camera_radius();
-    let height = grid_config.camera_height();
     for mut t in query_camera.iter_mut() {
         t.translation = Vec3::new(
-            center.x + radius * camera.angle.cos(),
-            center.y + height,
-            center.z + radius * camera.angle.sin(),
+            Vec3::ZERO.x + CAMERA_RADIUS * camera.angle.cos(),
+            Vec3::ZERO.y + CAMERA_HEIGHT,
+            Vec3::ZERO.z + CAMERA_RADIUS * camera.angle.sin(),
         );
-        t.look_at(center, Vec3::Y);
+        t.look_at(Vec3::ZERO, Vec3::Y);
     }
 }
 
@@ -1288,13 +1268,12 @@ fn egui_ui_system(
                 CameraMode::Manual => "Camera: Manual",
             };
             if ui.button(cam_label).clicked() {
-                let center = grid_config.center();
                 camera.mode = match camera.mode {
                     CameraMode::AutoOrbit => {
                         for mut poc in &mut query_cam {
                             poc.enabled = true;
-                            poc.focus = center;
-                            poc.target_focus = center;
+                            poc.focus = Vec3::ZERO;
+                            poc.target_focus = Vec3::ZERO;
                         }
                         CameraMode::Manual
                     }
@@ -1415,29 +1394,26 @@ fn egui_ui_system(
                 ..default()
             })));
 
-        let center = grid_config.center();
         match camera.mode {
             CameraMode::AutoOrbit => {
-                let radius = grid_config.camera_radius();
-                let height = grid_config.camera_height();
                 let angle = camera.angle;
                 commands.entity(entities.camera).insert(
                     Transform::from_xyz(
-                        center.x + radius * angle.cos(),
-                        center.y + height,
-                        center.z + radius * angle.sin(),
+                        Vec3::ZERO.x + CAMERA_RADIUS * angle.cos(),
+                        Vec3::ZERO.y + CAMERA_HEIGHT,
+                        Vec3::ZERO.z + CAMERA_RADIUS * angle.sin(),
                     )
-                    .looking_at(center, Vec3::Y),
+                    .looking_at(Vec3::ZERO, Vec3::Y),
                 );
             }
             CameraMode::Manual => {
                 commands.entity(entities.camera).insert(PanOrbitCamera {
-                    focus: center,
-                    target_focus: center,
+                    focus: Vec3::ZERO,
+                    target_focus: Vec3::ZERO,
                     ..default()
                 });
                 if let Ok(mut transform) = query_cam_transform.get_mut(entities.camera) {
-                    transform.look_at(center, Vec3::Y);
+                    transform.look_at(Vec3::ZERO, Vec3::Y);
                 }
             }
         }
