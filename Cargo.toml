@@ -19,7 +19,7 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "default_font",
     "bevy_log",
 ] }
-bevy_egui = "0.39"
+bevy_egui = "0.40"
 bevy_panorbit_camera = "0.34.0"
 rand = "0.10.1"
 
