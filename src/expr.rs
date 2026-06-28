@@ -146,6 +146,14 @@ impl Node {
                         new.pre_eval(vars);
                         *self = new;
                     }
+                    (Node::Neg(a_inner), _) if *a_inner == *b => {
+                        // (-a) + a = 0
+                        *self = Node::Num(0.0);
+                    }
+                    (_, Node::Neg(b_inner)) if *a == *b_inner => {
+                        // a + (-a) = 0
+                        *self = Node::Num(0.0);
+                    }
                     (Node::Neg(a_inner), _) => {
                         // (-a) + b = b - a
                         let mut new = Node::Sub(b.clone(), a_inner.clone());
@@ -158,6 +166,36 @@ impl Node {
                         new.pre_eval(vars);
                         *self = new;
                     }
+                    _ if *a == *b => {
+                        // a + a => 2*a
+                        let mut new = Node::Mul(Box::new(Node::Num(2.0)), a.clone());
+                        new.pre_eval(vars);
+                        *self = new;
+                    }
+                    // reassociate: (x + c1) + c2 / (c1 + x) + c2 => x + (c1 + c2)
+                    (Node::Add(left, right), Node::Num(c2)) => {
+                        if let Node::Num(c1) = right.as_ref() {
+                            let mut new = Node::Add(left.clone(), Box::new(Node::Num(*c1 + *c2)));
+                            new.pre_eval(vars);
+                            *self = new;
+                        } else if let Node::Num(c1) = left.as_ref() {
+                            let mut new = Node::Add(right.clone(), Box::new(Node::Num(*c1 + *c2)));
+                            new.pre_eval(vars);
+                            *self = new;
+                        }
+                    }
+                    // reassociate: c1 + (x + c2) / c1 + (c2 + x) => x + (c1 + c2)
+                    (Node::Num(c1), Node::Add(left, right)) => {
+                        if let Node::Num(c2) = right.as_ref() {
+                            let mut new = Node::Add(left.clone(), Box::new(Node::Num(*c1 + *c2)));
+                            new.pre_eval(vars);
+                            *self = new;
+                        } else if let Node::Num(c2) = left.as_ref() {
+                            let mut new = Node::Add(right.clone(), Box::new(Node::Num(*c1 + *c2)));
+                            new.pre_eval(vars);
+                            *self = new;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -169,6 +207,14 @@ impl Node {
                 } else if let Node::Neg(b_inner) = b.as_ref() {
                     // a - (-b) => a + b
                     let mut new = Node::Add(a.clone(), b_inner.clone());
+                    new.pre_eval(vars);
+                    *self = new;
+                } else if *a == *b {
+                    // x - x => 0
+                    *self = Node::Num(0.0);
+                } else if let Node::Neg(a_inner) = a.as_ref() {
+                    // (-a) - b = -(a + b)
+                    let mut new = Node::Neg(Box::new(Node::Add(a_inner.clone(), b.clone())));
                     new.pre_eval(vars);
                     *self = new;
                 } else if let Node::Num(y) = b.as_ref()
@@ -208,6 +254,30 @@ impl Node {
                         new.pre_eval(vars);
                         *self = new;
                     }
+                    // reassociate: (x * c1) * c2 / (c1 * x) * c2 => x * (c1 * c2)
+                    (Node::Mul(left, right), Node::Num(c2)) => {
+                        if let Node::Num(c1) = right.as_ref() {
+                            let mut new = Node::Mul(left.clone(), Box::new(Node::Num(*c1 * *c2)));
+                            new.pre_eval(vars);
+                            *self = new;
+                        } else if let Node::Num(c1) = left.as_ref() {
+                            let mut new = Node::Mul(right.clone(), Box::new(Node::Num(*c1 * *c2)));
+                            new.pre_eval(vars);
+                            *self = new;
+                        }
+                    }
+                    // reassociate: c1 * (x * c2) / c1 * (c2 * x) => x * (c1 * c2)
+                    (Node::Num(c1), Node::Mul(left, right)) => {
+                        if let Node::Num(c2) = right.as_ref() {
+                            let mut new = Node::Mul(left.clone(), Box::new(Node::Num(*c1 * *c2)));
+                            new.pre_eval(vars);
+                            *self = new;
+                        } else if let Node::Num(c2) = left.as_ref() {
+                            let mut new = Node::Mul(right.clone(), Box::new(Node::Num(*c1 * *c2)));
+                            new.pre_eval(vars);
+                            *self = new;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -215,6 +285,10 @@ impl Node {
                 a.pre_eval(vars);
                 b.pre_eval(vars);
                 match (a.as_ref(), b.as_ref()) {
+                    _ if *a == *b => {
+                        // x / x => 1
+                        *self = Node::Num(1.0);
+                    }
                     (Node::Num(x), Node::Num(y)) => *self = Node::Num(x / y),
                     (_, Node::Num(y)) if *y == 1.0 => *self = *a.clone(),
                     (Node::Num(x), _) if *x == 0.0 => *self = Node::Num(0.0),
@@ -223,9 +297,21 @@ impl Node {
                         new.pre_eval(vars);
                         *self = new;
                     }
+                    (_, Node::Num(y)) => {
+                        // x / c => x * (1/c)
+                        let mut new = Node::Mul(a.clone(), Box::new(Node::Num(1.0 / *y)));
+                        new.pre_eval(vars);
+                        *self = new;
+                    }
                     (Node::Neg(a_inner), Node::Neg(b_inner)) => {
                         // (-a) / (-b) = a / b
                         let mut new = Node::Div(a_inner.clone(), b_inner.clone());
+                        new.pre_eval(vars);
+                        *self = new;
+                    }
+                    (_, Node::Neg(b_inner)) => {
+                        // a / (-b) = -(a / b)
+                        let mut new = Node::Neg(Box::new(Node::Div(a.clone(), b_inner.clone())));
                         new.pre_eval(vars);
                         *self = new;
                     }
@@ -246,6 +332,19 @@ impl Node {
                     (_, Node::Num(y)) if *y == 0.0 => *self = Node::Num(1.0),
                     (_, Node::Num(y)) if *y == 1.0 => *self = *a.clone(),
                     (Node::Num(x), _) if *x == 1.0 => *self = Node::Num(1.0),
+                    (Node::Neg(a_inner), Node::Num(y))
+                        if *y == (*y as i32) as f64 && (*y as i32) % 2 == 0 =>
+                    {
+                        // (-x)^n => x^n  for even integer n
+                        let mut new = Node::Pow(a_inner.clone(), b.clone());
+                        new.pre_eval(vars);
+                        *self = new;
+                    }
+                    (Node::Var(_), Node::Num(y)) if *y == 2.0 => {
+                        let mut new_node = Node::Mul(a.clone(), a.clone());
+                        new_node.pre_eval(vars);
+                        *self = new_node;
+                    }
                     _ => {}
                 }
             }
@@ -276,8 +375,12 @@ impl Node {
                     });
                 } else if let Node::F1(g, inner) = a.as_ref() {
                     match (f, g) {
-                        // ln(exp(x)) = x
+                        // inverse compositions: f(g(x)) = x
                         (F1::Ln, F1::Exp) => *self = *inner.clone(),
+                        (F1::Exp, F1::Ln) => *self = *inner.clone(),
+                        (F1::Sin, F1::Asin) => *self = *inner.clone(),
+                        (F1::Cos, F1::Acos) => *self = *inner.clone(),
+                        (F1::Tan, F1::Atan) => *self = *inner.clone(),
                         // idempotent: f(f(x)) = f(x)
                         (F1::Abs, F1::Abs)
                         | (F1::Floor, F1::Floor)
@@ -347,8 +450,11 @@ impl Node {
                 Box::new(move |vars: &[f64]| {
                     let base = a_fn(vars);
                     let exp = b_fn(vars);
+                    let exp_int = exp as i32;
                     if base == 0.0 && exp == 0.0 {
                         1.0
+                    } else if (exp_int as f64) == exp {
+                        base.powi(exp_int)
                     } else {
                         base.powf(exp)
                     }
@@ -392,8 +498,11 @@ impl Node {
                     F2::Pow => {
                         let base = a_fn(vars);
                         let exp = b_fn(vars);
+                        let exp_int = exp as i32;
                         if base == 0.0 && exp == 0.0 {
                             1.0
+                        } else if (exp_int as f64) == exp {
+                            base.powi(exp_int)
                         } else {
                             base.powf(exp)
                         }
@@ -929,6 +1038,165 @@ mod tests {
         // 0^0 = 1 through pre_eval
         assert_eq!(pe("0^0", &[]), Node::Num(1.0));
         assert_eq!(pe("pow(0, 0)", &[]), Node::Num(1.0));
+
+        // x - x => 0
+        assert_eq!(pe("x - x", &[]), Node::Num(0.0));
+        assert_eq!(pe("x - x", &[None, Some(3.0), None]), Node::Num(0.0));
+
+        // x / x => 1
+        assert_eq!(pe("x / x", &[]), Node::Num(1.0));
+
+        // a + a => 2*a
+        let mut n = parse("x + x", &dim).unwrap();
+        n.pre_eval(&[]);
+        assert_eq!(
+            n,
+            Node::Mul(Box::new(Node::Num(2.0)), Box::new(Node::Var(0)))
+        );
+
+        // (-a) - b = -(a + b)
+        let mut n = parse("-x - y", &dim).unwrap();
+        n.pre_eval(&[]);
+        assert_eq!(
+            n,
+            Node::Neg(Box::new(Node::Add(
+                Box::new(Node::Var(0)),
+                Box::new(Node::Var(1)),
+            )))
+        );
+
+        // a / (-b) = -(a / b)
+        let mut n = parse("x / -y", &dim).unwrap();
+        n.pre_eval(&[]);
+        assert_eq!(
+            n,
+            Node::Neg(Box::new(Node::Div(
+                Box::new(Node::Var(0)),
+                Box::new(Node::Var(1)),
+            )))
+        );
+
+        // (-x)^n => x^n for even n  (then x^2 => x*x, x^4 stays as pow)
+        assert_eq!(
+            pe("(-x)^2", &[]),
+            Node::Mul(Box::new(Node::Var(0)), Box::new(Node::Var(0)))
+        );
+        assert_eq!(
+            pe("(-x)^4", &[]),
+            Node::Pow(Box::new(Node::Var(0)), Box::new(Node::Num(4.0)))
+        );
+        assert_eq!(
+            pe("(-x)^(-2)", &[]),
+            Node::Pow(Box::new(Node::Var(0)), Box::new(Node::Num(-2.0)))
+        );
+        // (-x)^3 stays as Pow(Neg(x), 3) — odd n
+        let mut n = parse("(-x)^3", &dim).unwrap();
+        n.pre_eval(&[]);
+        assert_eq!(
+            n,
+            Node::Pow(
+                Box::new(Node::Neg(Box::new(Node::Var(0)))),
+                Box::new(Node::Num(3.0))
+            )
+        );
+
+        // x / c => x * (1/c)
+        let mut n = parse("x / 3", &dim).unwrap();
+        n.pre_eval(&[]);
+        assert_eq!(
+            n,
+            Node::Mul(Box::new(Node::Var(0)), Box::new(Node::Num(1.0 / 3.0)))
+        );
+
+        // (x + c1) + c2 => x + (c1 + c2)
+        assert_eq!(
+            pe("(x + 3) + 2", &[]),
+            Node::Add(Box::new(Node::Var(0)), Box::new(Node::Num(5.0)))
+        );
+        // (c1 + x) + c2 => x + (c1 + c2)
+        assert_eq!(
+            pe("(3 + x) + 2", &[]),
+            Node::Add(Box::new(Node::Var(0)), Box::new(Node::Num(5.0)))
+        );
+        // c1 + (x + c2) => x + (c1 + c2)
+        assert_eq!(
+            pe("3 + (x + 2)", &[]),
+            Node::Add(Box::new(Node::Var(0)), Box::new(Node::Num(5.0)))
+        );
+        // c1 + (c2 + x) => x + (c1 + c2)
+        assert_eq!(
+            pe("3 + (2 + x)", &[]),
+            Node::Add(Box::new(Node::Var(0)), Box::new(Node::Num(5.0)))
+        );
+        // deep nesting: (((x+1)+2)+3) => x + 6
+        assert_eq!(
+            pe("(((x + 1) + 2) + 3)", &[]),
+            Node::Add(Box::new(Node::Var(0)), Box::new(Node::Num(6.0)))
+        );
+
+        // (x * c1) * c2 => x * (c1 * c2)
+        assert_eq!(
+            pe("(x * 3) * 2", &[]),
+            Node::Mul(Box::new(Node::Var(0)), Box::new(Node::Num(6.0)))
+        );
+        // (c1 * x) * c2 => x * (c1 * c2)
+        assert_eq!(
+            pe("(3 * x) * 2", &[]),
+            Node::Mul(Box::new(Node::Var(0)), Box::new(Node::Num(6.0)))
+        );
+        // c1 * (x * c2) => x * (c1 * c2)
+        assert_eq!(
+            pe("3 * (x * 2)", &[]),
+            Node::Mul(Box::new(Node::Var(0)), Box::new(Node::Num(6.0)))
+        );
+        // c1 * (c2 * x) => x * (c1 * c2)
+        assert_eq!(
+            pe("3 * (2 * x)", &[]),
+            Node::Mul(Box::new(Node::Var(0)), Box::new(Node::Num(6.0)))
+        );
+
+        // exp(ln(x)) = x
+        let mut n = parse("exp(ln(x))", &dim).unwrap();
+        n.pre_eval(&[]);
+        assert_eq!(n, Node::Var(0));
+
+        // sin(asin(x)) = x
+        let mut n = parse("sin(asin(x))", &dim).unwrap();
+        n.pre_eval(&[]);
+        assert_eq!(n, Node::Var(0));
+
+        // cos(acos(x)) = x
+        let mut n = parse("cos(acos(x))", &dim).unwrap();
+        n.pre_eval(&[]);
+        assert_eq!(n, Node::Var(0));
+
+        // tan(atan(x)) = x
+        let mut n = parse("tan(atan(x))", &dim).unwrap();
+        n.pre_eval(&[]);
+        assert_eq!(n, Node::Var(0));
+
+        // Runtime verification: all optimizations produce correct values
+        let e = |s: &str, v: &[f64]| {
+            let mut n = parse(s, &dim).unwrap();
+            n.pre_eval(&v.iter().copied().map(Some).collect::<Vec<_>>());
+            n.compile()(v)
+        };
+        assert_eq!(e("x - x", &[5.0, 0.0, 0.0]), 0.0);
+        assert_eq!(e("x / x", &[5.0, 0.0, 0.0]), 1.0);
+        assert_eq!(e("x + x", &[3.0, 0.0, 0.0]), 6.0);
+        assert_eq!(e("-x - y", &[2.0, 3.0, 0.0]), -5.0);
+        assert_eq!(e("x / -y", &[6.0, 2.0, 0.0]), -3.0);
+        assert_eq!(e("x^(-1)", &[5.0, 0.0, 0.0]), 0.2);
+        assert_eq!(e("(-x)^2", &[5.0, 0.0, 0.0]), 25.0);
+        assert_eq!(e("exp(ln(x))", &[2.0, 0.0, 0.0]), 2.0);
+        assert_eq!(e("sin(asin(x))", &[0.0, 0.0, 0.0]), 0.0);
+        assert_eq!(e("cos(acos(x))", &[1.0, 0.0, 0.0]), 1.0);
+        assert_eq!(e("tan(atan(x))", &[0.0, 0.0, 0.0]), 0.0);
+        // (-a) + a = 0  and  a + (-a) = 0
+        assert_eq!(e("-x + x", &[5.0, 0.0, 0.0]), 0.0);
+        assert_eq!(e("x + -x", &[5.0, 0.0, 0.0]), 0.0);
+        assert_eq!(pe("-x + x", &[]), Node::Num(0.0));
+        assert_eq!(pe("x + -x", &[]), Node::Num(0.0));
     }
 
     #[test]
