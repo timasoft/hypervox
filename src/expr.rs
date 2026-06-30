@@ -14,9 +14,13 @@ pub enum Node {
     Pow(Box<Node>, Box<Node>),
     F1(F1, Box<Node>),
     F2(F2, Box<Node>, Box<Node>),
+    /// let slot_i = expr in body
+    Let(usize, Box<Node>, Box<Node>),
+    /// reference to cached CSE slot
+    CseRef(usize),
 }
 
-pub type CompiledExpr = Box<dyn Fn(&[f64]) -> f64 + Send + Sync>;
+pub type CompiledExpr = Box<dyn Fn(&[f64], &mut [f64]) -> f64 + Send + Sync>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum F0 {
@@ -407,6 +411,128 @@ impl Node {
                     });
                 }
             }
+            Node::Let(_slot, expr, body) => {
+                expr.pre_eval(vars);
+                body.pre_eval(vars);
+            }
+            Node::CseRef(_) => {}
+        }
+    }
+
+    pub fn cse_slots(&self) -> usize {
+        match self {
+            Node::Let(slot, expr, body) => {
+                let slot = *slot + 1;
+                slot.max(expr.cse_slots()).max(body.cse_slots())
+            }
+            Node::CseRef(slot) => *slot + 1,
+            Node::Neg(a) => a.cse_slots(),
+            Node::Add(a, b)
+            | Node::Sub(a, b)
+            | Node::Mul(a, b)
+            | Node::Div(a, b)
+            | Node::Pow(a, b)
+            | Node::F2(_, a, b) => a.cse_slots().max(b.cse_slots()),
+            Node::F1(_, a) => a.cse_slots(),
+            Node::Num(_) | Node::Var(_) => 0,
+        }
+    }
+
+    pub fn cse(&mut self) {
+        let mut slot = 0usize;
+        while self.cse_one_pass(slot) {
+            slot += 1;
+        }
+    }
+
+    /// Preparation pipeline: pre_eval, CSE, compile.
+    /// Returns (compiled_expr, cse_slots).
+    pub fn prepare(&mut self, vars: &[Option<f64>]) -> (CompiledExpr, usize) {
+        self.pre_eval(vars);
+        self.cse();
+        (self.compile(), self.cse_slots())
+    }
+
+    /// Single-pass: find one repeated subtree, extract into Let.
+    fn cse_one_pass(&mut self, slot: usize) -> bool {
+        let pattern = {
+            let mut nodes: Vec<&Node> = Vec::new();
+            Self::cse_collect_non_trivial(self, &mut nodes);
+
+            let mut found = None::<Node>;
+            'outer: for i in 0..nodes.len() {
+                for j in (i + 1)..nodes.len() {
+                    if *nodes[i] == *nodes[j] {
+                        found = Some(nodes[i].clone());
+                        break 'outer;
+                    }
+                }
+            }
+            found
+        };
+
+        if let Some(pattern) = pattern {
+            self.cse_replace_all(&pattern, slot);
+
+            let old_self = std::mem::replace(self, Node::Num(0.0));
+            *self = Node::Let(slot, Box::new(pattern), Box::new(old_self));
+
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cse_collect_non_trivial<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+        match node {
+            Node::Num(_) | Node::Var(_) | Node::CseRef(_) => {}
+            Node::Let(_, expr, body) => {
+                Self::cse_collect_non_trivial(expr, out);
+                Self::cse_collect_non_trivial(body, out);
+            }
+            Node::Neg(a) => {
+                out.push(node);
+                Self::cse_collect_non_trivial(a, out);
+            }
+            Node::Add(a, b)
+            | Node::Sub(a, b)
+            | Node::Mul(a, b)
+            | Node::Div(a, b)
+            | Node::Pow(a, b)
+            | Node::F2(_, a, b) => {
+                out.push(node);
+                Self::cse_collect_non_trivial(a, out);
+                Self::cse_collect_non_trivial(b, out);
+            }
+            Node::F1(_, a) => {
+                out.push(node);
+                Self::cse_collect_non_trivial(a, out);
+            }
+        }
+    }
+
+    fn cse_replace_all(&mut self, pattern: &Node, slot: usize) {
+        if *self == *pattern {
+            *self = Node::CseRef(slot);
+            return;
+        }
+        match self {
+            Node::Num(_) | Node::Var(_) | Node::CseRef(_) => {}
+            Node::Neg(a) => a.cse_replace_all(pattern, slot),
+            Node::Add(a, b)
+            | Node::Sub(a, b)
+            | Node::Mul(a, b)
+            | Node::Div(a, b)
+            | Node::Pow(a, b)
+            | Node::F2(_, a, b) => {
+                a.cse_replace_all(pattern, slot);
+                b.cse_replace_all(pattern, slot);
+            }
+            Node::F1(_, a) => a.cse_replace_all(pattern, slot),
+            Node::Let(_, expr, body) => {
+                expr.cse_replace_all(pattern, slot);
+                body.cse_replace_all(pattern, slot);
+            }
         }
     }
 
@@ -414,42 +540,42 @@ impl Node {
         match self {
             Node::Num(v) => {
                 let v = *v;
-                Box::new(move |_| v)
+                Box::new(move |_, _| v)
             }
             Node::Var(i) => {
                 let i = *i;
-                Box::new(move |vars: &[f64]| vars[i])
+                Box::new(move |vars: &[f64], _| vars[i])
             }
             Node::Neg(a) => {
                 let a_fn = a.compile();
-                Box::new(move |vars: &[f64]| -a_fn(vars))
+                Box::new(move |vars: &[f64], cse: &mut [f64]| -a_fn(vars, cse))
             }
             Node::Add(a, b) => {
                 let a_fn = a.compile();
                 let b_fn = b.compile();
-                Box::new(move |vars: &[f64]| a_fn(vars) + b_fn(vars))
+                Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) + b_fn(vars, cse))
             }
             Node::Sub(a, b) => {
                 let a_fn = a.compile();
                 let b_fn = b.compile();
-                Box::new(move |vars: &[f64]| a_fn(vars) - b_fn(vars))
+                Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) - b_fn(vars, cse))
             }
             Node::Mul(a, b) => {
                 let a_fn = a.compile();
                 let b_fn = b.compile();
-                Box::new(move |vars: &[f64]| a_fn(vars) * b_fn(vars))
+                Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) * b_fn(vars, cse))
             }
             Node::Div(a, b) => {
                 let a_fn = a.compile();
                 let b_fn = b.compile();
-                Box::new(move |vars: &[f64]| a_fn(vars) / b_fn(vars))
+                Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) / b_fn(vars, cse))
             }
             Node::Pow(a, b) => {
                 let a_fn = a.compile();
                 let b_fn = b.compile();
-                Box::new(move |vars: &[f64]| {
-                    let base = a_fn(vars);
-                    let exp = b_fn(vars);
+                Box::new(move |vars: &[f64], cse: &mut [f64]| {
+                    let base = a_fn(vars, cse);
+                    let exp = b_fn(vars, cse);
                     let exp_int = exp as i32;
                     if base == 0.0 && exp == 0.0 {
                         1.0
@@ -463,8 +589,8 @@ impl Node {
             Node::F1(f, a) => {
                 let f = *f;
                 let a_fn = a.compile();
-                Box::new(move |vars: &[f64]| {
-                    let v = a_fn(vars);
+                Box::new(move |vars: &[f64], cse: &mut [f64]| {
+                    let v = a_fn(vars, cse);
                     match f {
                         F1::Sin => v.sin(),
                         F1::Cos => v.cos(),
@@ -493,11 +619,11 @@ impl Node {
                 let f = *f;
                 let a_fn = a.compile();
                 let b_fn = b.compile();
-                Box::new(move |vars: &[f64]| match f {
-                    F2::Atan2 => a_fn(vars).atan2(b_fn(vars)),
+                Box::new(move |vars: &[f64], cse: &mut [f64]| match f {
+                    F2::Atan2 => a_fn(vars, cse).atan2(b_fn(vars, cse)),
                     F2::Pow => {
-                        let base = a_fn(vars);
-                        let exp = b_fn(vars);
+                        let base = a_fn(vars, cse);
+                        let exp = b_fn(vars, cse);
                         let exp_int = exp as i32;
                         if base == 0.0 && exp == 0.0 {
                             1.0
@@ -508,6 +634,19 @@ impl Node {
                         }
                     }
                 })
+            }
+            Node::Let(slot, expr, body) => {
+                let slot = *slot;
+                let expr_fn = expr.compile();
+                let body_fn = body.compile();
+                Box::new(move |vars: &[f64], cse: &mut [f64]| {
+                    cse[slot] = expr_fn(vars, cse);
+                    body_fn(vars, cse)
+                })
+            }
+            Node::CseRef(slot) => {
+                let slot = *slot;
+                Box::new(move |_: &[f64], cse: &mut [f64]| cse[slot])
             }
         }
     }
@@ -931,7 +1070,7 @@ mod tests {
     #[test]
     fn test_eval_basic_ops() {
         let dim = DimConfig::default();
-        let e = |s: &str| parse(s, &dim).unwrap().compile()(&[]);
+        let e = |s: &str| parse(s, &dim).unwrap().compile()(&[], &mut []);
         assert_eq!(e("3 + 5"), 8.0);
         assert_eq!(e("10 - 7"), 3.0);
         assert_eq!(e("4 * 6"), 24.0);
@@ -945,7 +1084,7 @@ mod tests {
     #[test]
     fn test_eval_vars_funcs_consts() {
         let dim = DimConfig::default();
-        let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v);
+        let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v, &mut []);
         assert_eq!(e("x + y + z", &[1.0, 2.0, 3.0]), 6.0);
         assert_eq!(e("2 * x", &[5.0, 0.0, 0.0]), 10.0);
         assert_eq!(e("sqrt(4)", &[]), 2.0);
@@ -1179,7 +1318,7 @@ mod tests {
         let e = |s: &str, v: &[f64]| {
             let mut n = parse(s, &dim).unwrap();
             n.pre_eval(&v.iter().copied().map(Some).collect::<Vec<_>>());
-            n.compile()(v)
+            n.compile()(v, &mut [])
         };
         assert_eq!(e("x - x", &[5.0, 0.0, 0.0]), 0.0);
         assert_eq!(e("x / x", &[5.0, 0.0, 0.0]), 1.0);
@@ -1197,6 +1336,111 @@ mod tests {
         assert_eq!(e("x + -x", &[5.0, 0.0, 0.0]), 0.0);
         assert_eq!(pe("-x + x", &[]), Node::Num(0.0));
         assert_eq!(pe("x + -x", &[]), Node::Num(0.0));
+    }
+
+    #[test]
+    fn test_cse_basic() {
+        let dim = DimConfig::default();
+        let cse_eval = |s: &str, v: &[f64]| {
+            let mut n = parse(s, &dim).unwrap();
+            let (f, slots) = n.prepare(&[]);
+            let mut cache = vec![0.0; slots];
+            f(v, &mut cache)
+        };
+
+        // (x+1)*(x+1)
+        assert_eq!(cse_eval("(x+1)*(x+1)", &[5.0, 0.0, 0.0]), 36.0);
+
+        // x*x + x*x
+        assert_eq!(cse_eval("x*x + x*x", &[3.0, 0.0, 0.0]), 18.0);
+
+        // sin(x)*cos(y) + sin(x)*cos(y)
+        assert_eq!(
+            cse_eval("sin(x)*cos(y) + sin(x)*cos(y)", &[1.0, 2.0, 0.0]),
+            2.0 * (1.0_f64.sin() * 2.0_f64.cos())
+        );
+
+        let no_cse = |s: &str, v: &[f64]| {
+            let mut n = parse(s, &dim).unwrap();
+            n.pre_eval(&[]);
+            n.compile()(v, &mut [])
+        };
+        for &(expr, vars) in &[
+            ("x*x + y*y + x*x", &[2.0, 3.0, 0.0]),
+            ("x*x*x + x*x*x", &[2.0, 0.0, 0.0]),
+            ("(x+y)*(x+y)", &[1.0, 2.0, 0.0]),
+            ("sqrt(x*x + y*y) + sqrt(x*x + y*y)", &[3.0, 4.0, 0.0]),
+        ] {
+            assert_eq!(
+                cse_eval(expr, vars),
+                no_cse(expr, vars),
+                "CSE result mismatch for '{expr}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cse_nested() {
+        let dim = DimConfig::default();
+        let cse_eval = |s: &str, v: &[f64]| {
+            let mut n = parse(s, &dim).unwrap();
+            let (f, slots) = n.prepare(&[]);
+            let mut cache = vec![0.0; slots];
+            f(v, &mut cache)
+        };
+        let no_cse = |s: &str, v: &[f64]| {
+            let mut n = parse(s, &dim).unwrap();
+            n.pre_eval(&[]);
+            n.compile()(v, &mut [])
+        };
+
+        for &(expr, vars) in &[
+            ("sin(x*x + y*y) + cos(x*x + y*y)", &[1.0, 2.0, 0.0]),
+            ("sin(x*x + y*y) + cos(x*x + y*y) + x*x", &[1.0, 2.0, 0.0]),
+        ] {
+            assert_eq!(
+                cse_eval(expr, vars),
+                no_cse(expr, vars),
+                "CSE nested result mismatch for '{expr}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cse_multiple_extractions() {
+        let dim = DimConfig::default();
+        let cse_eval = |s: &str, v: &[f64]| {
+            let mut n = parse(s, &dim).unwrap();
+            let (f, slots) = n.prepare(&[]);
+            let mut cache = vec![0.0; slots];
+            f(v, &mut cache)
+        };
+        let no_cse = |s: &str, v: &[f64]| {
+            let mut n = parse(s, &dim).unwrap();
+            n.pre_eval(&[]);
+            n.compile()(v, &mut [])
+        };
+
+        for &(expr, vars) in &[
+            ("x*x + x*x + y*y + y*y", &[2.0, 3.0, 0.0]),
+            ("(x+1)*(x+1) + (x+1)", &[5.0, 0.0, 0.0]),
+            ("x*x*y + x*x*z + x*x", &[2.0, 3.0, 4.0]),
+        ] {
+            assert_eq!(
+                cse_eval(expr, vars),
+                no_cse(expr, vars),
+                "CSE multi mismatch for '{expr}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cse_no_duplicates() {
+        let dim = DimConfig::default();
+        let mut n = parse("x + y + z", &dim).unwrap();
+        n.pre_eval(&[]);
+        n.cse();
+        assert_eq!(n, parse("x + y + z", &dim).unwrap());
     }
 
     #[test]
@@ -1219,7 +1463,7 @@ mod tests {
             z_dim: 3,
             ..DimConfig::default()
         };
-        let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v);
+        let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v, &mut []);
         assert_eq!(e("x0", &[5.0, 0.0, 0.0, 0.0]), 5.0);
         assert_eq!(e("x3", &[0.0, 0.0, 0.0, 5.0]), 5.0);
         assert!(parse("x4", &dim).is_err());
