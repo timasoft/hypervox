@@ -181,24 +181,34 @@ fn compute_sign_grid(
     }
 
     let mut expr = expr.clone();
-    let (compiled_expr, cse_slots) = expr.prepare(&vars_options);
+    let multi = expr.prepare_multi(&vars_options, &[dim.x_dim, dim.y_dim, dim.z_dim]);
 
     let x0 = -world_half_extent + dim.world_offset.0;
     let y0 = -world_half_extent + dim.world_offset.1;
     let z0 = -world_half_extent + dim.world_offset.2;
 
-    let mut cse_cache = vec![0.0; cse_slots];
+    let mut cache = vec![0.0; multi.cse_slots];
     for nz in 0..node_dim {
         let fz = z0 + nz as f64 * step;
         vars[dim.z_dim] = fz;
+        for group in &multi.groups {
+            if group.level == 2 {
+                (group.combined)(&vars, &mut cache);
+            }
+        }
         for ny in 0..node_dim {
             let fy = y0 + ny as f64 * step;
             vars[dim.y_dim] = fy;
+            for group in &multi.groups {
+                if group.level == 1 {
+                    (group.combined)(&vars, &mut cache);
+                }
+            }
             for nx in 0..node_dim {
                 let fx = x0 + nx as f64 * step;
                 vars[dim.x_dim] = fx;
                 let idx = nx + ny * node_dim + nz * node_dim_sq;
-                sign_grid[idx] = eval_sign(compiled_expr(&vars, &mut cse_cache));
+                sign_grid[idx] = eval_sign((multi.main)(&vars, &mut cache));
             }
         }
     }
@@ -228,7 +238,7 @@ fn compute_sign_grid_par(
     }
 
     let mut expr = expr.clone();
-    let (compiled_expr, cse_slots) = expr.prepare(&base_vars_options);
+    let multi = expr.prepare_multi(&base_vars_options, &[dim.x_dim, dim.y_dim, dim.z_dim]);
 
     let total = node_dim * node_dim_sq;
     let num_threads = num_cpus::get();
@@ -244,19 +254,28 @@ fn compute_sign_grid_par(
             let start_nx = start % node_dim;
 
             let mut vars = base_vars.clone();
-            let mut cse_cache = vec![0.0; cse_slots];
+            let mut cache = vec![0.0; multi.cse_slots];
             let mut nz = start_nz;
             let mut ny = start_ny;
             let mut nx = start_nx;
 
+            vars[dim.z_dim] = z0 + nz as f64 * step;
+            for group in &multi.groups {
+                if group.level == 2 {
+                    (group.combined)(&vars, &mut cache);
+                }
+            }
+            vars[dim.y_dim] = y0 + ny as f64 * step;
+            for group in &multi.groups {
+                if group.level == 1 {
+                    (group.combined)(&vars, &mut cache);
+                }
+            }
+
             for cell in chunk.iter_mut() {
                 let fx = x0 + nx as f64 * step;
-                let fy = y0 + ny as f64 * step;
-                let fz = z0 + nz as f64 * step;
                 vars[dim.x_dim] = fx;
-                vars[dim.y_dim] = fy;
-                vars[dim.z_dim] = fz;
-                *cell = eval_sign(compiled_expr(&vars, &mut cse_cache));
+                *cell = eval_sign((multi.main)(&vars, &mut cache));
 
                 nx += 1;
                 if nx == node_dim {
@@ -265,6 +284,18 @@ fn compute_sign_grid_par(
                     if ny == node_dim {
                         ny = 0;
                         nz += 1;
+                        vars[dim.z_dim] = z0 + nz as f64 * step;
+                        for group in &multi.groups {
+                            if group.level == 2 {
+                                (group.combined)(&vars, &mut cache);
+                            }
+                        }
+                    }
+                    vars[dim.y_dim] = y0 + ny as f64 * step;
+                    for group in &multi.groups {
+                        if group.level == 1 {
+                            (group.combined)(&vars, &mut cache);
+                        }
                     }
                 }
             }

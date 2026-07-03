@@ -1,6 +1,33 @@
-use std::{fmt::Display, str::FromStr};
+use std::{
+    fmt::Display,
+    ops::{BitAnd, BitOr},
+    str::FromStr,
+};
 
 use crate::math::DimConfig;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepMask(u128);
+
+impl From<u128> for DepMask {
+    fn from(value: u128) -> Self {
+        DepMask(value)
+    }
+}
+
+impl BitOr for DepMask {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self::Output::from(self.0 | rhs.0)
+    }
+}
+
+impl BitAnd for DepMask {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self::Output::from(self.0 & rhs.0)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -17,7 +44,7 @@ pub enum Node {
     /// let slot_i = expr in body
     Let(usize, Box<Node>, Box<Node>),
     /// reference to cached CSE slot
-    CseRef(usize),
+    CseRef(usize, DepMask),
 }
 
 pub type CompiledExpr = Box<dyn Fn(&[f64], &mut [f64]) -> f64 + Send + Sync>;
@@ -116,6 +143,17 @@ impl FromStr for F2 {
             _ => Err(format!("unknown function '{s}'")),
         }
     }
+}
+
+pub struct InvariantGroup {
+    pub level: u8,
+    pub combined: CompiledExpr,
+}
+
+pub struct CompiledExprMulti {
+    pub groups: Vec<InvariantGroup>,
+    pub main: CompiledExpr,
+    pub cse_slots: usize,
 }
 
 impl Node {
@@ -415,7 +453,7 @@ impl Node {
                 expr.pre_eval(vars);
                 body.pre_eval(vars);
             }
-            Node::CseRef(_) => {}
+            Node::CseRef(_, _) => {}
         }
     }
 
@@ -425,7 +463,7 @@ impl Node {
                 let slot = *slot + 1;
                 slot.max(expr.cse_slots()).max(body.cse_slots())
             }
-            Node::CseRef(slot) => *slot + 1,
+            Node::CseRef(slot, _) => *slot + 1,
             Node::Neg(a) => a.cse_slots(),
             Node::Add(a, b)
             | Node::Sub(a, b)
@@ -447,10 +485,23 @@ impl Node {
 
     /// Preparation pipeline: pre_eval, CSE, compile.
     /// Returns (compiled_expr, cse_slots).
+    #[cfg(test)]
     pub fn prepare(&mut self, vars: &[Option<f64>]) -> (CompiledExpr, usize) {
         self.pre_eval(vars);
         self.cse();
         (self.compile(), self.cse_slots())
+    }
+
+    /// Preparation pipeline: pre_eval, CSE, compile_multi.
+    /// Returns compiled_expr_multi.
+    pub fn prepare_multi(
+        &mut self,
+        vars: &[Option<f64>],
+        spatial_dims: &[usize],
+    ) -> CompiledExprMulti {
+        self.pre_eval(vars);
+        self.cse();
+        self.compile_multi(spatial_dims)
     }
 
     /// Single-pass: find one repeated subtree, extract into Let.
@@ -485,7 +536,7 @@ impl Node {
 
     fn cse_collect_non_trivial<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
         match node {
-            Node::Num(_) | Node::Var(_) | Node::CseRef(_) => {}
+            Node::Num(_) | Node::Var(_) | Node::CseRef(_, _) => {}
             Node::Let(_, expr, body) => {
                 Self::cse_collect_non_trivial(expr, out);
                 Self::cse_collect_non_trivial(body, out);
@@ -513,11 +564,11 @@ impl Node {
 
     fn cse_replace_all(&mut self, pattern: &Node, slot: usize) {
         if *self == *pattern {
-            *self = Node::CseRef(slot);
+            *self = Node::CseRef(slot, pattern.depends_on());
             return;
         }
         match self {
-            Node::Num(_) | Node::Var(_) | Node::CseRef(_) => {}
+            Node::Num(_) | Node::Var(_) | Node::CseRef(_, _) => {}
             Node::Neg(a) => a.cse_replace_all(pattern, slot),
             Node::Add(a, b)
             | Node::Sub(a, b)
@@ -533,6 +584,22 @@ impl Node {
                 expr.cse_replace_all(pattern, slot);
                 body.cse_replace_all(pattern, slot);
             }
+        }
+    }
+
+    pub fn depends_on(&self) -> DepMask {
+        match self {
+            Node::Num(_) => 0.into(),
+            Node::Var(i) => (1 << *i).into(),
+            Node::Neg(a) | Node::F1(_, a) => a.depends_on(),
+            Node::Add(a, b)
+            | Node::Sub(a, b)
+            | Node::Mul(a, b)
+            | Node::Div(a, b)
+            | Node::Pow(a, b)
+            | Node::F2(_, a, b) => a.depends_on() | b.depends_on(),
+            Node::Let(_, expr, body) => expr.depends_on() | body.depends_on(),
+            Node::CseRef(_, deps) => *deps,
         }
     }
 
@@ -644,10 +711,186 @@ impl Node {
                     body_fn(vars, cse)
                 })
             }
-            Node::CseRef(slot) => {
+            Node::CseRef(slot, _) => {
                 let slot = *slot;
                 Box::new(move |_: &[f64], cse: &mut [f64]| cse[slot])
             }
+        }
+    }
+
+    pub fn compile_invariants_combined(
+        &mut self,
+        invariant_mask: DepMask,
+        slot: &mut usize,
+    ) -> Option<CompiledExpr> {
+        let mut pieces: Vec<(usize, Node)> = Vec::new();
+
+        self.collect_invariants(invariant_mask, slot, &mut pieces);
+
+        if pieces.is_empty() {
+            return None;
+        }
+
+        let mut chain = Node::Num(0.0);
+        for (slot, node) in pieces.into_iter().rev() {
+            chain = Node::Let(slot, Box::new(node), Box::new(chain));
+        }
+
+        Some(chain.compile())
+    }
+
+    fn collect_invariants(
+        &mut self,
+        invariant_mask: DepMask,
+        slot: &mut usize,
+        pieces: &mut Vec<(usize, Node)>,
+    ) {
+        let deps = self.depends_on();
+        if deps & invariant_mask == 0.into()
+            && !matches!(self, Node::Num(_) | Node::Var(_) | Node::CseRef(_, _))
+        {
+            let node = std::mem::replace(self, Node::CseRef(*slot, deps));
+            pieces.push((*slot, node));
+            *slot += 1;
+        } else {
+            match self {
+                Node::Num(_) | Node::Var(_) | Node::CseRef(_, _) => {}
+                Node::Neg(a) | Node::F1(_, a) => a.collect_invariants(invariant_mask, slot, pieces),
+                Node::Add(a, b)
+                | Node::Sub(a, b)
+                | Node::Mul(a, b)
+                | Node::Div(a, b)
+                | Node::Pow(a, b)
+                | Node::F2(_, a, b) => {
+                    a.collect_invariants(invariant_mask, slot, pieces);
+                    b.collect_invariants(invariant_mask, slot, pieces);
+                }
+                Node::Let(ls, expr, body) => {
+                    expr.collect_invariants(invariant_mask, slot, pieces);
+
+                    let alias = if let Node::CseRef(rs, deps) = expr.as_ref()
+                        && *deps & invariant_mask == 0.into()
+                        && *rs != *ls
+                    {
+                        Some((*ls, *rs))
+                    } else {
+                        None
+                    };
+
+                    if let Some((ls, rs)) = alias {
+                        let mut folded = std::mem::replace(body.as_mut(), Node::Num(0.0));
+                        folded.remap_cse_slot(ls, rs);
+                        *self = folded;
+                        self.collect_invariants(invariant_mask, slot, pieces);
+                        return;
+                    }
+
+                    body.collect_invariants(invariant_mask, slot, pieces);
+                }
+            }
+        }
+    }
+
+    fn fold_cse_aliases(&mut self) {
+        if let Node::Let(slot, expr, _) = self
+            && let Node::CseRef(other, _) = expr.as_ref()
+            && *slot != *other
+        {
+            let old_slot = *slot;
+            let new_slot = *other;
+            if let Node::Let(_, _, body) = std::mem::replace(self, Node::Num(0.0)) {
+                let mut mapped = *body;
+                mapped.remap_cse_slot(old_slot, new_slot);
+                mapped.fold_cse_aliases();
+                *self = mapped;
+            }
+        } else {
+            match self {
+                Node::Num(_) | Node::Var(_) | Node::CseRef(_, _) => {}
+                Node::Neg(a) | Node::F1(_, a) => a.fold_cse_aliases(),
+                Node::Add(a, b)
+                | Node::Sub(a, b)
+                | Node::Mul(a, b)
+                | Node::Div(a, b)
+                | Node::Pow(a, b)
+                | Node::F2(_, a, b) => {
+                    a.fold_cse_aliases();
+                    b.fold_cse_aliases();
+                }
+                Node::Let(_, expr, body) => {
+                    expr.fold_cse_aliases();
+                    body.fold_cse_aliases();
+                }
+            }
+        }
+    }
+
+    fn remap_cse_slot(&mut self, old_slot: usize, new_slot: usize) {
+        match self {
+            Node::CseRef(slot, _) if *slot == old_slot => *slot = new_slot,
+            Node::Num(_) | Node::Var(_) | Node::CseRef(_, _) => {}
+            Node::Neg(a) | Node::F1(_, a) => a.remap_cse_slot(old_slot, new_slot),
+            Node::Add(a, b)
+            | Node::Sub(a, b)
+            | Node::Mul(a, b)
+            | Node::Div(a, b)
+            | Node::Pow(a, b)
+            | Node::F2(_, a, b) => {
+                a.remap_cse_slot(old_slot, new_slot);
+                b.remap_cse_slot(old_slot, new_slot);
+            }
+            Node::Let(_, expr, body) => {
+                expr.remap_cse_slot(old_slot, new_slot);
+                body.remap_cse_slot(old_slot, new_slot);
+            }
+        }
+    }
+
+    pub fn compile_multi(&mut self, spatial_dims: &[usize]) -> CompiledExprMulti {
+        let masks: Vec<DepMask> = {
+            let n = spatial_dims.len();
+            let total = 1u8 << n;
+            let mut masks_by_popcount: Vec<Vec<DepMask>> = vec![Vec::new(); n + 1];
+
+            for bits in 1..(total - 1) {
+                let msk = (0..n)
+                    .filter(|&i| (bits >> i) & 1 == 1)
+                    .map(|i| 1u128 << spatial_dims[i])
+                    .sum::<u128>()
+                    .into();
+                masks_by_popcount[bits.count_ones() as usize].push(msk);
+            }
+
+            masks_by_popcount.into_iter().rev().flatten().collect()
+        };
+
+        let inner_bit: DepMask = (1u128 << spatial_dims[0]).into();
+
+        let mut slot = self.cse_slots();
+        let mut groups = Vec::with_capacity(masks.len());
+
+        for mask in masks {
+            // Skip masks without x (innermost) — nothing to hoist to
+            if mask & inner_bit == 0.into() {
+                continue;
+            }
+            if let Some(combined) = self.compile_invariants_combined(mask, &mut slot) {
+                let level = spatial_dims
+                    .iter()
+                    .take_while(|&&d| (mask & DepMask::from(1u128 << d)) != 0.into())
+                    .count() as u8;
+                groups.push(InvariantGroup { level, combined });
+            }
+        }
+
+        self.fold_cse_aliases();
+        let main = self.compile();
+        let cse_slots = self.cse_slots();
+
+        CompiledExprMulti {
+            groups,
+            main,
+            cse_slots,
         }
     }
 }
@@ -1441,6 +1684,104 @@ mod tests {
         n.pre_eval(&[]);
         n.cse();
         assert_eq!(n, parse("x + y + z", &dim).unwrap());
+    }
+
+    #[test]
+    fn test_let_chain_order() {
+        let pieces = vec![
+            (
+                1usize,
+                Node::Mul(Box::new(Node::Var(2)), Box::new(Node::Var(2))),
+            ),
+            (0usize, Node::CseRef(1, DepMask::from(0))),
+            (
+                2usize,
+                Node::F1(
+                    F1::Ln,
+                    Box::new(Node::Add(
+                        Box::new(Node::CseRef(0, DepMask::from(4))),
+                        Box::new(Node::Num(1.0)),
+                    )),
+                ),
+            ),
+        ];
+        let vars = [1.5, 2.5, -3.0];
+
+        let mut chain = Node::Num(0.0);
+        for (slot, node) in pieces.clone().into_iter().rev() {
+            chain = Node::Let(slot, Box::new(node), Box::new(chain));
+        }
+        let mut cse = vec![0.0; 10];
+        let _ = chain.compile()(&vars, &mut cse);
+        assert!((cse[1] - 9.0).abs() < 1e-12, "cse[1]");
+        assert!(
+            (cse[0] - 9.0).abs() < 1e-12,
+            "cse[0] should be 9.0, got {}",
+            cse[0]
+        );
+        assert!(
+            (cse[2] - (10.0_f64).ln()).abs() < 1e-12,
+            "cse[2] should be ln(10), got {}",
+            cse[2]
+        );
+    }
+
+    #[test]
+    fn test_cse_vs_nocse() {
+        let dim = DimConfig::default();
+        let exprs = [
+            ("simple", "x + y * z"),
+            ("medium", "sin(x) + cos(y) * z^2 + sqrt(x*x + y*y)"),
+            (
+                "heavy",
+                "exp(sin(x) * cos(y)) + ln(z*z + 1) + atan2(sqrt(x*x + y*y + z*z), 1) + sqrt(abs(x + y))",
+            ),
+            ("repeated", "(x*x + y*y)*(x*x + y*y) + sin(x*x + y*y)"),
+        ];
+        let side = 32;
+        let scale = 10.0 / side as f64;
+
+        for (name, expr_str) in &exprs {
+            let mut node1 = parse(expr_str, &dim).unwrap();
+            node1.pre_eval(&[]);
+            let multi1 = node1.compile_multi(&[0, 1, 2]);
+
+            let mut node2 = parse(expr_str, &dim).unwrap();
+            let multi2 = node2.prepare_multi(&[], &[0, 1, 2]);
+
+            let mut sum1 = 0.0_f64;
+            let mut sum2 = 0.0_f64;
+
+            for nz in 0..side {
+                let zv = nz as f64 * scale - 5.0;
+                for ny in 0..side {
+                    let yv = ny as f64 * scale - 5.0;
+                    for nx in 0..side {
+                        let xv = nx as f64 * scale - 5.0;
+                        let vars = [xv, yv, zv];
+
+                        let mut cache1 = vec![0.0; multi1.cse_slots];
+                        for g in &multi1.groups {
+                            (g.combined)(&vars, &mut cache1);
+                        }
+                        sum1 += (multi1.main)(&vars, &mut cache1);
+
+                        let mut cache2 = vec![0.0; multi2.cse_slots];
+                        for g in &multi2.groups {
+                            (g.combined)(&vars, &mut cache2);
+                        }
+                        sum2 += (multi2.main)(&vars, &mut cache2);
+                    }
+                }
+            }
+
+            let diff = (sum1 - sum2).abs();
+            let tol = 1e-12;
+            assert!(
+                diff < tol,
+                "CSE divergence in '{name}': diff={diff:.6e} > tol={tol:.6e}"
+            );
+        }
     }
 
     #[test]
