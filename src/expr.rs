@@ -633,18 +633,58 @@ impl Node {
                 Box::new(move |vars: &[f64], _| vars[i])
             }
             Node::Neg(a) => {
-                let a_fn = a.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| -a_fn(vars, cse))
+                if let Node::Mul(x, y) = a.as_ref() {
+                    let x_fn = x.compile();
+                    let y_fn = y.compile();
+                    Box::new(move |vars: &[f64], cse: &mut [f64]| {
+                        -(x_fn(vars, cse) * y_fn(vars, cse))
+                    })
+                } else {
+                    let a_fn = a.compile();
+                    Box::new(move |vars: &[f64], cse: &mut [f64]| -a_fn(vars, cse))
+                }
             }
             Node::Add(a, b) => {
-                let a_fn = a.compile();
-                let b_fn = b.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) + b_fn(vars, cse))
+                if let (Node::Mul(x, y), _) = (a.as_ref(), b.as_ref()) {
+                    let x_fn = x.compile();
+                    let y_fn = y.compile();
+                    let c_fn = b.compile();
+                    Box::new(move |vars: &[f64], cse: &mut [f64]| {
+                        x_fn(vars, cse).mul_add(y_fn(vars, cse), c_fn(vars, cse))
+                    })
+                } else if let (_, Node::Mul(x, y)) = (a.as_ref(), b.as_ref()) {
+                    let c_fn = a.compile();
+                    let x_fn = x.compile();
+                    let y_fn = y.compile();
+                    Box::new(move |vars: &[f64], cse: &mut [f64]| {
+                        x_fn(vars, cse).mul_add(y_fn(vars, cse), c_fn(vars, cse))
+                    })
+                } else {
+                    let a_fn = a.compile();
+                    let b_fn = b.compile();
+                    Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) + b_fn(vars, cse))
+                }
             }
             Node::Sub(a, b) => {
-                let a_fn = a.compile();
-                let b_fn = b.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) - b_fn(vars, cse))
+                if let (Node::Mul(x, y), _) = (a.as_ref(), b.as_ref()) {
+                    let x_fn = x.compile();
+                    let y_fn = y.compile();
+                    let c_fn = b.compile();
+                    Box::new(move |vars: &[f64], cse: &mut [f64]| {
+                        x_fn(vars, cse).mul_add(y_fn(vars, cse), -c_fn(vars, cse))
+                    })
+                } else if let (_, Node::Mul(x, y)) = (a.as_ref(), b.as_ref()) {
+                    let c_fn = a.compile();
+                    let x_fn = x.compile();
+                    let y_fn = y.compile();
+                    Box::new(move |vars: &[f64], cse: &mut [f64]| {
+                        x_fn(vars, cse).mul_add(-y_fn(vars, cse), c_fn(vars, cse))
+                    })
+                } else {
+                    let a_fn = a.compile();
+                    let b_fn = b.compile();
+                    Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) - b_fn(vars, cse))
+                }
             }
             Node::Mul(a, b) => {
                 let a_fn = a.compile();
@@ -1761,6 +1801,74 @@ mod tests {
             assert!(
                 diff < tol,
                 "CSE divergence in '{name}': diff={diff:.6e} > tol={tol:.6e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compile_patterns_fused() {
+        let dim = DimConfig::default();
+
+        let cases = [
+            // MulAdd: a*b + c
+            ("x*y + z", [2.0, 3.0, 4.0], 10.0),
+            ("z + x*y", [2.0, 3.0, 4.0], 10.0),
+            ("x*y + z", [-1.5, 2.0, 3.0], 0.0),
+            ("x*y + z", [0.0, 5.0, 1.0], 1.0),
+            // MulSub: a*b - c
+            ("x*y - z", [2.0, 3.0, 4.0], 2.0),
+            ("x*y - z", [1.0, 1.0, 0.5], 0.5),
+            // NegMulAdd: c - a*b
+            ("z - x*y", [2.0, 3.0, 4.0], -2.0),
+            ("z - x*y", [1.0, 1.0, 5.0], 4.0),
+            // NegMul: -(a*b)
+            ("-(x*y)", [2.0, 3.0, 0.0], -6.0),
+            ("-(x*y)", [-2.0, 3.0, 0.0], 6.0),
+        ];
+
+        for &(expr, vars, expected) in &cases {
+            // Fused path (direct compile)
+            let n = parse(expr, &dim).unwrap();
+            let fused = n.compile()(&vars, &mut []);
+
+            // Ref path (pre_eval + compile)
+            let mut n_ref = parse(expr, &dim).unwrap();
+            n_ref.pre_eval(&[]);
+            let ref_val = n_ref.compile()(&vars, &mut []);
+
+            let diff = (fused - ref_val).abs();
+            assert!(
+                diff < 1e-12,
+                "fused mismatch for '{expr}': fused={fused}, ref={ref_val}, diff={diff:.6e}"
+            );
+            let exp_diff = (fused - expected).abs();
+            assert!(
+                exp_diff < 1e-12,
+                "wrong result for '{expr}': fused={fused}, expected={expected}, diff={exp_diff:.6e}"
+            );
+        }
+
+        // Fuzz: fused vs full pipeline (pre_eval + CSE + compile)
+        let fuzz_cases: &[(&str, &[f64])] = &[
+            ("x*y + z", &[1.5, 2.5, 3.5]),
+            ("z + x*y", &[1.5, 2.5, 3.5]),
+            ("x*y - z", &[1.5, 2.5, 3.5]),
+            ("z - x*y", &[1.5, 2.5, 3.5]),
+            ("-(x*y)", &[1.5, 2.5, 0.0]),
+        ];
+        for &(expr, vars) in fuzz_cases {
+            let n = parse(expr, &dim).unwrap();
+            let fused = n.compile()(vars, &mut []);
+
+            let mut n_ref = parse(expr, &dim).unwrap();
+            let (f_prep, slots) = n_ref.prepare(&[]);
+            let mut c = vec![0.0; slots];
+            let prep = f_prep(vars, &mut c);
+
+            let diff = (fused - prep).abs();
+            assert!(
+                diff < 1e-12,
+                "fused vs pipeline mismatch for '{expr}': fused={fused}, prep={prep}, diff={diff:.6e}"
             );
         }
     }
