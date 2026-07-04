@@ -99,6 +99,34 @@ pub enum F1 {
     Abs,
 }
 
+impl F1 {
+    #[inline]
+    pub fn to_fn(self) -> fn(f64) -> f64 {
+        match self {
+            Self::Sin => f64::sin,
+            Self::Cos => f64::cos,
+            Self::Tan => f64::tan,
+            Self::Asin => f64::asin,
+            Self::Acos => f64::acos,
+            Self::Atan => f64::atan,
+            Self::Sinh => f64::sinh,
+            Self::Cosh => f64::cosh,
+            Self::Tanh => f64::tanh,
+            Self::Sqrt => f64::sqrt,
+            Self::Cbrt => f64::cbrt,
+            Self::Exp => f64::exp,
+            Self::Ln => f64::ln,
+            Self::Log10 => f64::log10,
+            Self::Log2 => f64::log2,
+            Self::Floor => f64::floor,
+            Self::Ceil => f64::ceil,
+            Self::Round => f64::round,
+            Self::Trunc => f64::trunc,
+            Self::Abs => f64::abs,
+        }
+    }
+}
+
 impl FromStr for F1 {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -132,6 +160,27 @@ impl FromStr for F1 {
 pub enum F2 {
     Atan2,
     Pow,
+}
+
+impl F2 {
+    #[inline]
+    pub fn to_fn(self) -> fn(f64, f64) -> f64 {
+        match self {
+            Self::Atan2 => f64::atan2,
+            Self::Pow => |a, b| {
+                if a == 0.0 && b == 0.0 {
+                    1.0
+                } else {
+                    let exp_int = b as i32;
+                    if (exp_int as f64) == b {
+                        a.powi(exp_int)
+                    } else {
+                        a.powf(b)
+                    }
+                }
+            },
+        }
+    }
 }
 
 impl FromStr for F2 {
@@ -393,28 +442,7 @@ impl Node {
             Node::F1(f, a) => {
                 a.pre_eval(vars);
                 if let Node::Num(x) = a.as_ref() {
-                    *self = Node::Num(match f {
-                        F1::Sin => x.sin(),
-                        F1::Cos => x.cos(),
-                        F1::Tan => x.tan(),
-                        F1::Asin => x.asin(),
-                        F1::Acos => x.acos(),
-                        F1::Atan => x.atan(),
-                        F1::Sinh => x.sinh(),
-                        F1::Cosh => x.cosh(),
-                        F1::Tanh => x.tanh(),
-                        F1::Sqrt => x.sqrt(),
-                        F1::Cbrt => x.cbrt(),
-                        F1::Exp => x.exp(),
-                        F1::Ln => x.ln(),
-                        F1::Log10 => x.log10(),
-                        F1::Log2 => x.log2(),
-                        F1::Floor => x.floor(),
-                        F1::Ceil => x.ceil(),
-                        F1::Round => x.round(),
-                        F1::Trunc => x.trunc(),
-                        F1::Abs => x.abs(),
-                    });
+                    *self = Node::Num(f.to_fn()(*x));
                 } else if let Node::F1(g, inner) = a.as_ref() {
                     match (f, g) {
                         // inverse compositions: f(g(x)) = x
@@ -437,16 +465,7 @@ impl Node {
                 a.pre_eval(vars);
                 b.pre_eval(vars);
                 if let (Node::Num(x), Node::Num(y)) = (a.as_ref(), b.as_ref()) {
-                    *self = Node::Num(match f {
-                        F2::Atan2 => x.atan2(*y),
-                        F2::Pow => {
-                            if *x == 0.0 && *y == 0.0 {
-                                1.0
-                            } else {
-                                x.powf(*y)
-                            }
-                        }
-                    });
+                    *self = Node::Num(f.to_fn()(*x, *y));
                 }
             }
             Node::Let(_slot, expr, body) => {
@@ -654,53 +673,15 @@ impl Node {
                 })
             }
             Node::F1(f, a) => {
-                let f = *f;
+                let f = f.to_fn();
                 let a_fn = a.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| {
-                    let v = a_fn(vars, cse);
-                    match f {
-                        F1::Sin => v.sin(),
-                        F1::Cos => v.cos(),
-                        F1::Tan => v.tan(),
-                        F1::Asin => v.asin(),
-                        F1::Acos => v.acos(),
-                        F1::Atan => v.atan(),
-                        F1::Sinh => v.sinh(),
-                        F1::Cosh => v.cosh(),
-                        F1::Tanh => v.tanh(),
-                        F1::Sqrt => v.sqrt(),
-                        F1::Cbrt => v.cbrt(),
-                        F1::Exp => v.exp(),
-                        F1::Ln => v.ln(),
-                        F1::Log10 => v.log10(),
-                        F1::Log2 => v.log2(),
-                        F1::Floor => v.floor(),
-                        F1::Ceil => v.ceil(),
-                        F1::Round => v.round(),
-                        F1::Trunc => v.trunc(),
-                        F1::Abs => v.abs(),
-                    }
-                })
+                Box::new(move |vars: &[f64], cse: &mut [f64]| f(a_fn(vars, cse)))
             }
             Node::F2(f, a, b) => {
-                let f = *f;
+                let f = f.to_fn();
                 let a_fn = a.compile();
                 let b_fn = b.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| match f {
-                    F2::Atan2 => a_fn(vars, cse).atan2(b_fn(vars, cse)),
-                    F2::Pow => {
-                        let base = a_fn(vars, cse);
-                        let exp = b_fn(vars, cse);
-                        let exp_int = exp as i32;
-                        if base == 0.0 && exp == 0.0 {
-                            1.0
-                        } else if (exp_int as f64) == exp {
-                            base.powi(exp_int)
-                        } else {
-                            base.powf(exp)
-                        }
-                    }
-                })
+                Box::new(move |vars: &[f64], cse: &mut [f64]| f(a_fn(vars, cse), b_fn(vars, cse)))
             }
             Node::Let(slot, expr, body) => {
                 let slot = *slot;
