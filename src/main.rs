@@ -891,9 +891,16 @@ fn egui_ui_system(
         return;
     };
 
-    egui::SidePanel::left("left_panel")
+    let mut viewport_ui = egui::Ui::new(
+        ctx.clone(),
+        egui::Id::new("viewport_ui"),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(ctx.viewport_rect()),
+    );
+    egui::Panel::left("left_panel")
         .resizable(true)
-        .show(ctx, |ui| {
+        .show(&mut viewport_ui, |ui| {
             ui.heading("Generation");
 
             ui.label("Expressions:");
