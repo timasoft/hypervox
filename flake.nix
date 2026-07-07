@@ -50,10 +50,21 @@
         ];
       };
 
+      cargoVendorDir = craneLib.vendorMultipleCargoDeps {
+        inherit (craneLib.findCargoFiles src) cargoConfigs;
+        cargoLockList = [
+          ./Cargo.lock
+          "${rustToolchain.passthru.availableComponents.rust-src}/lib/rustlib/src/rust/library/Cargo.lock"
+        ];
+      };
+
       nativeCargoArtifacts = craneLib.buildDepsOnly {
         inherit src;
+        inherit cargoVendorDir;
         nativeBuildInputs = with pkgs; [ pkg-config ];
         buildInputs = runtimeDeps;
+
+        doCheck = false;
 
         env = {
           PKG_CONFIG_PATH = pkgConfigPath;
@@ -66,10 +77,13 @@
         pname = "ndvoxgcalc";
         version = "0.1.0";
         inherit src;
+        inherit cargoVendorDir;
         cargoArtifacts = nativeCargoArtifacts;
 
         buildInputs = runtimeDeps;
         nativeBuildInputs = with pkgs; [ pkg-config makeWrapper ];
+
+        doCheck = false;
 
         env = {
           PKG_CONFIG_PATH = pkgConfigPath;
@@ -88,6 +102,7 @@
 
       webCargoArtifacts = craneLib.buildDepsOnly {
         inherit src;
+        inherit cargoVendorDir;
         CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
         doCheck = false;
         CARGO_PROFILE_RELEASE_LTO = "true";
@@ -98,9 +113,11 @@
         pname = "ndvoxgcalc-web";
         version = "0.1.0";
         inherit src;
+        inherit cargoVendorDir;
         cargoArtifacts = webCargoArtifacts;
 
         CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+        doCheck = false;
 
         wasm-bindgen-cli = pkgs.wasm-bindgen-cli_0_2_117;
 
