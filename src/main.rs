@@ -10,8 +10,6 @@ use bevy::{
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
-
-#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -21,8 +19,34 @@ use web_time::Instant;
 
 use crate::math::DimConfig;
 
+#[cfg(target_arch = "wasm32")]
+use std::sync::OnceLock;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::JsFuture;
+
 mod expr;
 mod math;
+
+#[cfg(target_arch = "wasm32")]
+static PARALLEL_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+#[cfg(target_arch = "wasm32")]
+fn set_parallel_available(val: bool) {
+    let _ = PARALLEL_AVAILABLE.set(val);
+}
+
+fn parallel_available() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        *PARALLEL_AVAILABLE.get().unwrap_or(&false)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        true
+    }
+}
 
 /// First value `v` where `v + step == v` due to f64 rounding.
 /// Always a power of two: `pow2_ceil(step * 2^53)`.
@@ -301,7 +325,26 @@ fn validate_expression(expr_str: &str, dim_mapping: &DimMapping) -> Result<(), S
     expr::parse(trimmed, &dim_mapping.into()).map(|_| ())
 }
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+async fn wasm_start() {
+    let num_threads = web_sys::window()
+        .map(|w| w.navigator().hardware_concurrency())
+        .map(|c| c as usize)
+        .unwrap_or(1)
+        .max(1);
+    let result = JsFuture::from(wasm_bindgen_rayon::init_thread_pool(num_threads)).await;
+    if result.is_ok() {
+        set_parallel_available(true);
+    } else {
+        web_sys::console::log_1(&"init_thread_pool failed, falling back to sequential".into());
+    }
+    main();
+}
+
 fn main() {
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = rayon::ThreadPoolBuilder::new().build_global();
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -381,21 +424,21 @@ fn setup(
 
     let mesh_start = Instant::now();
 
-    #[cfg(target_arch = "wasm32")]
-    build_batched_mesh_with_global_corner_ambient_occlusion(
-        &mut mesh,
-        &composite,
-        &grid_config,
-        voxel_count,
-    );
-
-    #[cfg(not(target_arch = "wasm32"))]
-    build_batched_mesh_with_global_corner_ambient_occlusion_par(
-        &mut mesh,
-        &composite,
-        &grid_config,
-        voxel_count,
-    );
+    if parallel_available() {
+        build_batched_mesh_with_global_corner_ambient_occlusion_par(
+            &mut mesh,
+            &composite,
+            &grid_config,
+            voxel_count,
+        );
+    } else {
+        build_batched_mesh_with_global_corner_ambient_occlusion(
+            &mut mesh,
+            &composite,
+            &grid_config,
+            voxel_count,
+        );
+    }
 
     let mesh_build_ms = mesh_start.elapsed().as_secs_f64() * 1000.0;
     let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
@@ -481,6 +524,7 @@ fn generate_voxels(
             base_color,
             half_extent,
             &dim_mapping.into(),
+            parallel_available(),
         ) {
             Ok((grid, grid_timings)) => {
                 timings.sign_grid_ms += grid_timings.sign_grid_ms;
@@ -713,7 +757,6 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion(
     mesh.insert_indices(Indices::U32(indices));
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
     mesh: &mut Mesh,
     composite: &[u32],
@@ -722,7 +765,7 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
 ) {
     info!("voxel_count: {}", voxel_count);
     let size = grid_config.size;
-    let chunk_count = num_cpus::get();
+    let chunk_count = rayon::current_num_threads();
     let chunk_size = (size as usize).div_ceil(chunk_count);
     let voxel_count_per_chunk = voxel_count.div_ceil(chunk_count);
     let results: Vec<_> = (0..size)
@@ -1365,21 +1408,21 @@ fn egui_ui_system(
         );
 
         let mesh_start = Instant::now();
-        #[cfg(target_arch = "wasm32")]
-        build_batched_mesh_with_global_corner_ambient_occlusion(
-            &mut mesh,
-            &composite,
-            &grid_config,
-            count,
-        );
-
-        #[cfg(not(target_arch = "wasm32"))]
-        build_batched_mesh_with_global_corner_ambient_occlusion_par(
-            &mut mesh,
-            &composite,
-            &grid_config,
-            count,
-        );
+        if parallel_available() {
+            build_batched_mesh_with_global_corner_ambient_occlusion_par(
+                &mut mesh,
+                &composite,
+                &grid_config,
+                count,
+            );
+        } else {
+            build_batched_mesh_with_global_corner_ambient_occlusion(
+                &mut mesh,
+                &composite,
+                &grid_config,
+                count,
+            );
+        }
         let mesh_build_ms = mesh_start.elapsed().as_secs_f64() * 1000.0;
         let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 

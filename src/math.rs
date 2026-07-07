@@ -1,5 +1,6 @@
 use crate::DimMapping;
 use crate::expr;
+use rayon::prelude::*;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -46,12 +47,14 @@ impl Default for DimConfig {
 /// - `base_color`: 24-bit RGB color (0xRRGGBB). Stored in grid as `base_color + 1`
 /// - `world_half_extent`: half the size of the region in world units.
 /// - `dim`: N-dimensional mapping config
+/// - `use_parallel`: whether to use parallel computation (rayon)
 pub fn generate_voxel_grid(
     size: usize,
     expr_str: &str,
     base_color: u32,
     world_half_extent: f64,
     dim: &DimConfig,
+    use_parallel: bool,
 ) -> Result<(Vec<u32>, GridTimings), String> {
     if size == 0 {
         return Ok((Vec::new(), GridTimings::default()));
@@ -78,53 +81,53 @@ pub fn generate_voxel_grid(
 
     let sign_start = Instant::now();
 
-    #[cfg(target_arch = "wasm32")]
-    compute_sign_grid(
-        &mut sign_grid,
-        &expr,
-        node_dim,
-        node_dim_sq,
-        step,
-        world_half_extent,
-        dim,
-    );
-
-    #[cfg(not(target_arch = "wasm32"))]
-    compute_sign_grid_par(
-        &mut sign_grid,
-        &expr,
-        node_dim,
-        node_dim_sq,
-        step,
-        world_half_extent,
-        dim,
-    );
+    if use_parallel {
+        compute_sign_grid_par(
+            &mut sign_grid,
+            &expr,
+            node_dim,
+            node_dim_sq,
+            step,
+            world_half_extent,
+            dim,
+        );
+    } else {
+        compute_sign_grid(
+            &mut sign_grid,
+            &expr,
+            node_dim,
+            node_dim_sq,
+            step,
+            world_half_extent,
+            dim,
+        );
+    }
 
     let sign_grid_ms = sign_start.elapsed().as_secs_f64() * 1000.0;
 
     let fill_start = Instant::now();
 
-    #[cfg(target_arch = "wasm32")]
-    fill_voxels(
-        &mut voxel_grid,
-        &sign_grid,
-        size,
-        node_dim,
-        node_dim_sq,
-        size_sq,
-        packed_color,
-    );
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fill_voxels_par(
-        &mut voxel_grid,
-        &sign_grid,
-        size,
-        node_dim,
-        node_dim_sq,
-        size_sq,
-        packed_color,
-    );
+    if use_parallel {
+        fill_voxels_par(
+            &mut voxel_grid,
+            &sign_grid,
+            size,
+            node_dim,
+            node_dim_sq,
+            size_sq,
+            packed_color,
+        );
+    } else {
+        fill_voxels(
+            &mut voxel_grid,
+            &sign_grid,
+            size,
+            node_dim,
+            node_dim_sq,
+            size_sq,
+            packed_color,
+        );
+    }
 
     let voxel_fill_ms = fill_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -166,7 +169,6 @@ fn init_fixed_vars(dim: &DimConfig) -> [f64; MAX_NDIM] {
     vars
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn compute_sign_grid(
     sign_grid: &mut [i8],
     expr: &expr::Node,
@@ -217,7 +219,6 @@ fn compute_sign_grid(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn compute_sign_grid_par(
     sign_grid: &mut [i8],
     expr: &expr::Node,
@@ -227,8 +228,6 @@ fn compute_sign_grid_par(
     world_half_extent: f64,
     dim: &DimConfig,
 ) {
-    use rayon::prelude::*;
-
     let x0 = -world_half_extent + dim.world_offset.0;
     let y0 = -world_half_extent + dim.world_offset.1;
     let z0 = -world_half_extent + dim.world_offset.2;
@@ -244,7 +243,7 @@ fn compute_sign_grid_par(
     let multi = expr.prepare_multi(&base_vars_options, &[dim.x_dim, dim.y_dim, dim.z_dim]);
 
     let total = node_dim * node_dim_sq;
-    let num_threads = num_cpus::get();
+    let num_threads = rayon::current_num_threads();
     let chunk_size = total.div_ceil(num_threads);
 
     sign_grid
@@ -305,7 +304,6 @@ fn compute_sign_grid_par(
         });
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn fill_voxels(
     voxel_grid: &mut [u32],
     sign_grid: &[i8],
@@ -360,7 +358,6 @@ fn fill_voxels(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn fill_voxels_par(
     voxel_grid: &mut [u32],
     sign_grid: &[i8],
@@ -370,10 +367,8 @@ fn fill_voxels_par(
     size_sq: usize,
     packed_color: u32,
 ) {
-    use rayon::prelude::*;
-
     let total_voxels = size * size_sq;
-    let num_threads = num_cpus::get();
+    let num_threads = rayon::current_num_threads();
     let chunk_size = total_voxels.div_ceil(num_threads);
 
     voxel_grid
@@ -437,29 +432,24 @@ mod tests {
 
     #[test]
     fn test_sphere_generation() {
-        // Sphere of radius 2 in region [-5, 5]
         let dim = DimConfig::default();
         let (grid, _) =
-            generate_voxel_grid(32, "x^2 + y^2 + z^2 - 4", 0xFF0000, 5.0, &dim).unwrap();
+            generate_voxel_grid(32, "x^2 + y^2 + z^2 - 4", 0xFF0000, 5.0, &dim, true).unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
         assert!(filled > 0 && filled < grid.len());
     }
 
     #[test]
     fn test_sinusoidal_surface() {
-        // Test that sin function works
         let dim = DimConfig::default();
         let (grid, _) =
-            generate_voxel_grid(16, "sin(x) + cos(y) + z", 0x00FF00, 8.0, &dim).unwrap();
+            generate_voxel_grid(16, "sin(x) + cos(y) + z", 0x00FF00, 8.0, &dim, true).unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
-        // Should generate some voxels, but not all
         assert!(filled > 0 && filled < grid.len());
     }
 
     #[test]
     fn test_4d_nd_variables() {
-        // 4D: x0=sphere radius, x1=x, x2=y, x3=z
-        // expression uses x0 (dim 3) as extra, mapped such that X=x0, Y=x1, Z=x2, x3 fixed
         let dim = DimConfig {
             ndim: 4,
             x_dim: 1,
@@ -468,10 +458,9 @@ mod tests {
             fixed: vec![0.0, 0.0, 0.0, 0.0],
             ..DimConfig::default()
         };
-        // x1^2 + x2^2 + x3^2 - x0^2 (sphere with radius x0)
-        // with x3 mapped to Z, x0 fixed at 0.0 → radius 0 → no sphere
         let (grid, _) =
-            generate_voxel_grid(16, "x1^2 + x2^2 + x3^2 - x0^2", 0x00FF00, 8.0, &dim).unwrap();
+            generate_voxel_grid(16, "x1^2 + x2^2 + x3^2 - x0^2", 0x00FF00, 8.0, &dim, true)
+                .unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
         assert_eq!(filled, 0);
     }

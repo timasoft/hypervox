@@ -6,6 +6,7 @@ dist = "dist"
 addresses = [ "0.0.0.0" ]
 port = 8080
 open = true
+headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder-Policy" = "require-corp" }
 
 [watch]
 watch = ["src", "Cargo.toml", "index.html"]

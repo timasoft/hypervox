@@ -14,7 +14,7 @@
         overlays = [ rust-overlay.overlays.default ];
       };
 
-      rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+      rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
         extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
         targets = [ "wasm32-unknown-unknown" ];
       };
@@ -112,6 +112,14 @@
           export WASM_BINDGEN_CACHE_DIR="$TMPDIR/wasm-bindgen"
           export XDG_CACHE_HOME="$TMPDIR/.cache"
           mkdir -p "$WASM_BINDGEN_CACHE_DIR" "$XDG_CACHE_HOME"
+        '';
+
+        postInstall = ''
+          cat > "$out/_headers" <<'EOF'
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+EOF
         '';
 
         CARGO_PROFILE_RELEASE_LTO = "true";
