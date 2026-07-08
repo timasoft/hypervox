@@ -660,17 +660,11 @@ fn process_z_range_multi(
                         continue;
                     }
 
-                    let mut ambient_occlusion_sum = 0.0;
-                    let mut cx_sum = 0.0;
-                    let mut cy_sum = 0.0;
-                    let mut cz_sum = 0.0;
+                    let mut ao_vals = [0.0f32; 4];
                     let mut corner_colors = [[0.0; 4]; 4];
 
                     for (i, &corner) in corners.iter().enumerate() {
                         let [cx, cy, cz] = corner;
-                        cx_sum += cx;
-                        cy_sum += cy;
-                        cz_sum += cz;
 
                         let cx_off = if cx > 0.0 { 1 } else { 0 };
                         let cy_off = if cy > 0.0 { 1 } else { 0 };
@@ -678,7 +672,7 @@ fn process_z_range_multi(
                         let corner_idx = cx_off | (cy_off << 1) | (cz_off << 2);
 
                         let ambient_occlusion = corner_ambient_occlusion[corner_idx];
-                        ambient_occlusion_sum += ambient_occlusion;
+                        ao_vals[i] = ambient_occlusion;
 
                         corner_colors[i] = [
                             base_linear.red * ambient_occlusion,
@@ -688,24 +682,7 @@ fn process_z_range_multi(
                         ];
                     }
 
-                    let center_ambient_occlusion = ambient_occlusion_sum / 4.0;
-                    let center_color = [
-                        base_linear.red * center_ambient_occlusion,
-                        base_linear.green * center_ambient_occlusion,
-                        base_linear.blue * center_ambient_occlusion,
-                        base_linear.alpha,
-                    ];
-                    let center_pos = [
-                        cx_sum / 4.0 * inv_size + offset.x,
-                        cy_sum / 4.0 * inv_size + offset.y,
-                        cz_sum / 4.0 * inv_size + offset.z,
-                    ];
-
                     let start_idx = positions.len() as u32;
-
-                    positions.push(center_pos);
-                    normals.push(normal);
-                    colors.push(center_color);
 
                     for (i, &corner) in corners.iter().enumerate() {
                         let [cx, cy, cz] = corner;
@@ -718,20 +695,25 @@ fn process_z_range_multi(
                         colors.push(corner_colors[i]);
                     }
 
-                    indices.extend_from_slice(&[
-                        start_idx,
-                        start_idx + 1,
-                        start_idx + 2,
-                        start_idx,
-                        start_idx + 2,
-                        start_idx + 3,
-                        start_idx,
-                        start_idx + 3,
-                        start_idx + 4,
-                        start_idx,
-                        start_idx + 4,
-                        start_idx + 1,
-                    ]);
+                    if ao_vals[0] + ao_vals[2] > ao_vals[1] + ao_vals[3] {
+                        indices.extend_from_slice(&[
+                            start_idx,
+                            start_idx + 1,
+                            start_idx + 2,
+                            start_idx,
+                            start_idx + 2,
+                            start_idx + 3,
+                        ]);
+                    } else {
+                        indices.extend_from_slice(&[
+                            start_idx,
+                            start_idx + 1,
+                            start_idx + 3,
+                            start_idx + 1,
+                            start_idx + 2,
+                            start_idx + 3,
+                        ]);
+                    }
                 }
             }
         }
