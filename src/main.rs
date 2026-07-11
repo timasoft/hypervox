@@ -739,6 +739,25 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion(
     mesh.insert_indices(Indices::U32(indices));
 }
 
+#[inline]
+fn split_disjoint<'a, T>(slice: &'a mut [T], counts: &[usize]) -> Vec<&'a mut [T]> {
+    debug_assert_eq!(
+        counts.iter().copied().sum::<usize>(),
+        slice.len(),
+        "split_disjoint: counts sum ({}) != slice len ({})",
+        counts.iter().copied().sum::<usize>(),
+        slice.len()
+    );
+    let mut parts = Vec::with_capacity(counts.len());
+    let mut rest = slice;
+    for &count in counts {
+        let (part, tail) = rest.split_at_mut(count);
+        parts.push(part);
+        rest = tail;
+    }
+    parts
+}
+
 fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
     mesh: &mut Mesh,
     composite: &[u32],
@@ -760,19 +779,59 @@ fn build_batched_mesh_with_global_corner_ambient_occlusion_par(
         })
         .collect();
 
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(voxel_count * 30);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(voxel_count * 30);
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(voxel_count * 30);
-    let mut indices: Vec<u32> = Vec::with_capacity(voxel_count * 72);
+    let vertex_counts: Vec<usize> = results.iter().map(|(pos, _, _, _)| pos.len()).collect();
+    let index_counts: Vec<usize> = results.iter().map(|(_, _, _, ind)| ind.len()).collect();
+    let total_vertices: usize = vertex_counts.iter().sum();
+    let total_indices: usize = index_counts.iter().sum();
 
-    let mut vertex_offset = 0u32;
-    for (pos, norm, col, ind) in results {
-        positions.extend(pos);
-        normals.extend(norm);
-        colors.extend(col);
-        indices.extend(ind.into_iter().map(|i| i + vertex_offset));
-        vertex_offset = positions.len() as u32;
+    let mut vertex_offsets = Vec::with_capacity(results.len());
+    {
+        let mut v_off = 0u32;
+        for &vc in &vertex_counts {
+            vertex_offsets.push(v_off);
+            v_off += vc as u32;
+        }
     }
+
+    let mut positions = Vec::with_capacity(total_vertices);
+    let mut normals = Vec::with_capacity(total_vertices);
+    let mut colors = Vec::with_capacity(total_vertices);
+    let mut indices = Vec::with_capacity(total_indices);
+
+    // SAFETY: every element is overwritten below before any read
+    unsafe {
+        positions.set_len(total_vertices);
+        normals.set_len(total_vertices);
+        colors.set_len(total_vertices);
+        indices.set_len(total_indices);
+    }
+
+    let pos_parts = split_disjoint(&mut positions, &vertex_counts);
+    let norm_parts = split_disjoint(&mut normals, &vertex_counts);
+    let col_parts = split_disjoint(&mut colors, &vertex_counts);
+    let idx_parts = split_disjoint(&mut indices, &index_counts);
+
+    rayon::scope(|s| {
+        for (i, (((pos_part, norm_part), col_part), idx_part)) in pos_parts
+            .into_iter()
+            .zip(norm_parts)
+            .zip(col_parts)
+            .zip(idx_parts)
+            .enumerate()
+        {
+            let result = &results[i];
+            let v_offset = vertex_offsets[i];
+
+            s.spawn(move |_| {
+                pos_part.copy_from_slice(&result.0);
+                norm_part.copy_from_slice(&result.1);
+                col_part.copy_from_slice(&result.2);
+                for (dst, &src) in idx_part.iter_mut().zip(result.3.iter()) {
+                    *dst = src + v_offset;
+                }
+            });
+        }
+    });
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
