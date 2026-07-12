@@ -73,6 +73,16 @@ fn first_bad_offset(step: f64) -> f64 {
     }
 }
 
+fn format_drag_value(val: f64) -> String {
+    let abs_val = val.abs();
+    if abs_val != 0.0 && (abs_val < 1e-6 || abs_val >= 1e6) {
+        format!("{val:e}")
+    } else {
+        let s = format!("{val:.6}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 /// Largest `voxel_size` where `first_bad_offset(v)` stays finite.
 /// Bound: `v * 2^53 < f64::MAX` → `v < f64::MAX / 2^53`.
 /// One ULP below that threshold to avoid `first_bad_offset` returning ∞.
@@ -1177,10 +1187,7 @@ fn egui_ui_system(
                     .add(
                         egui::DragValue::new(&mut grid_config.voxel_size)
                             .speed(0.0)
-                            .custom_formatter(|val, _| {
-                                let s = format!("{:.6}", val);
-                                s.trim_end_matches('0').trim_end_matches('.').to_string()
-                            })
+                            .custom_formatter(|val, _| format_drag_value(val))
                             .range(f64::MIN_POSITIVE..=MAX_VOXEL_SIZE),
                     )
                     .changed()
@@ -1301,10 +1308,7 @@ fn egui_ui_system(
                             .add(
                                 egui::DragValue::new(&mut dim_mapping.fixed[d])
                                     .speed(0.0)
-                                    .custom_formatter(|val, _| {
-                                        let s = format!("{:.6}", val);
-                                        s.trim_end_matches('0').trim_end_matches('.').to_string()
-                                    })
+                                    .custom_formatter(|val, _| format_drag_value(val))
                                     .range(-max_offset..=max_offset),
                             )
                             .changed()
@@ -1339,10 +1343,7 @@ fn egui_ui_system(
                         .add(
                             egui::DragValue::new(&mut ox)
                                 .speed(0.0)
-                                .custom_formatter(|val, _| {
-                                    let s = format!("{:.6}", val);
-                                    s.trim_end_matches('0').trim_end_matches('.').to_string()
-                                })
+                                .custom_formatter(|val, _| format_drag_value(val))
                                 .range(-max_abs_offset..=max_abs_offset),
                         )
                         .changed();
@@ -1357,10 +1358,7 @@ fn egui_ui_system(
                         .add(
                             egui::DragValue::new(&mut oy)
                                 .speed(0.0)
-                                .custom_formatter(|val, _| {
-                                    let s = format!("{:.6}", val);
-                                    s.trim_end_matches('0').trim_end_matches('.').to_string()
-                                })
+                                .custom_formatter(|val, _| format_drag_value(val))
                                 .range(-max_abs_offset..=max_abs_offset),
                         )
                         .changed();
@@ -1375,10 +1373,7 @@ fn egui_ui_system(
                         .add(
                             egui::DragValue::new(&mut oz)
                                 .speed(0.0)
-                                .custom_formatter(|val, _| {
-                                    let s = format!("{:.6}", val);
-                                    s.trim_end_matches('0').trim_end_matches('.').to_string()
-                                })
+                                .custom_formatter(|val, _| format_drag_value(val))
                                 .range(-max_abs_offset..=max_abs_offset),
                         )
                         .changed();
