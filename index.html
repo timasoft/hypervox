@@ -21,9 +21,81 @@
             height: 100vh;
             image-rendering: pixelated;
         }
+        #loading {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #ffffff;
+            z-index: 9999;
+            transition: opacity 0.4s ease-out;
+        }
+        #loading.fade-out {
+            opacity: 0;
+            pointer-events: none;
+        }
+        #loading h1 {
+            font-family: system-ui, -apple-system, sans-serif;
+            font-size: 1.6rem;
+            font-weight: 600;
+            color: #333;
+            margin: 0 0 1.5rem;
+        }
+        .spinner {
+            width: 36px;
+            height: 36px;
+            border: 3px solid #ddd;
+            border-top-color: #555;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        #loading-status {
+            font-family: system-ui, -apple-system, sans-serif;
+            font-size: 0.85rem;
+            color: #888;
+            margin-top: 1rem;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
+<div id="loading">
+    <h1>NDVoxGCalc</h1>
+    <div class="spinner"></div>
+    <div id="loading-status">Loading…</div>
+</div>
+<script>
+(function () {
+    const overlay = document.getElementById('loading');
+    const status  = document.getElementById('loading-status');
 
+    const timeout = setTimeout(function () {
+        status.textContent = 'Loading is taking longer than expected. Try reloading the page.';
+    }, 60000);
+
+    const observer = new MutationObserver(function (mutations) {
+        for (let i = 0; i < mutations.length; i++) {
+            const nodes = mutations[i].addedNodes;
+            for (let j = 0; j < nodes.length; j++) {
+                if (nodes[j].tagName === 'CANVAS') {
+                    clearTimeout(timeout);
+                    status.textContent = 'Ready';
+                    overlay.classList.add('fade-out');
+                    setTimeout(function () {
+                        overlay.remove();
+                    }, 500);
+                    observer.disconnect();
+                    return;
+                }
+            }
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+})();
+</script>
 </body>
 </html>
