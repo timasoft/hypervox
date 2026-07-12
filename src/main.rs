@@ -13,11 +13,21 @@ use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use rayon::prelude::*;
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 #[cfg(target_arch = "wasm32")]
-use web_time::Instant;
+use web_time::{Duration, Instant};
 
 use crate::math::DimConfig;
+
+const REGEN_DEBOUNCE: Duration = Duration::from_millis(300);
+
+#[derive(Default)]
+enum RegenRequest {
+    #[default]
+    None,
+    Debounce(Instant),
+    Force,
+}
 
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
@@ -962,7 +972,7 @@ fn egui_ui_system(
     mut camera: ResMut<CameraState>,
     mut query_cam: Query<&mut PanOrbitCamera>,
     mut auto_regen: ResMut<RegenerateEveryFrame>,
-    mut regenerate_request: Local<bool>,
+    mut regenerate_request: Local<RegenRequest>,
     mut expr_config: ResMut<ExpressionConfig>,
     mut expr_status: ResMut<ExpressionStatus>,
     entities: Res<SceneEntities>,
@@ -1002,12 +1012,12 @@ fn egui_ui_system(
                             .show(ui, |ui| {
                                 // Trigger regeneration when enabled state changes
                                 if ui.checkbox(&mut entry.enabled, "Enabled").changed() {
-                                    *regenerate_request = true;
+                                    *regenerate_request = RegenRequest::Debounce(Instant::now());
                                 }
 
                                 ui.label("Expression:");
                                 if ui.text_edit_singleline(&mut entry.expr).changed() {
-                                    *regenerate_request = true;
+                                    *regenerate_request = RegenRequest::Debounce(Instant::now());
                                     expr_status.errors.clear();
                                 }
 
@@ -1021,7 +1031,8 @@ fn egui_ui_system(
                                     if ui.color_edit_button_srgba(&mut color_edit).changed() {
                                         entry.color =
                                             (color_edit.r(), color_edit.g(), color_edit.b());
-                                        *regenerate_request = true;
+                                        *regenerate_request =
+                                            RegenRequest::Debounce(Instant::now());
                                     }
                                 });
 
@@ -1035,7 +1046,7 @@ fn egui_ui_system(
                     // Apply removals after iteration to avoid borrow issues
                     if let Some(idx) = remove_idx {
                         expr_config.entries.remove(idx);
-                        *regenerate_request = true;
+                        *regenerate_request = RegenRequest::Debounce(Instant::now());
                     }
                 });
 
@@ -1047,7 +1058,7 @@ fn egui_ui_system(
                     color: rand::random(),
                     enabled: true,
                 });
-                *regenerate_request = true;
+                *regenerate_request = RegenRequest::Debounce(Instant::now());
             }
 
             if !expr_status.errors.is_empty() {
@@ -1104,7 +1115,7 @@ fn egui_ui_system(
                     } else {
                         grid_config.size.saturating_sub(2).max(2)
                     };
-                    *regenerate_request = true;
+                    *regenerate_request = RegenRequest::Debounce(Instant::now());
                 }
 
                 let mut size = grid_config.size as i32;
@@ -1117,7 +1128,7 @@ fn egui_ui_system(
                     .changed()
                 {
                     grid_config.size = size as u32;
-                    *regenerate_request = true;
+                    *regenerate_request = RegenRequest::Debounce(Instant::now());
                 }
 
                 if ui.button("+").clicked() && grid_config.size < 256 {
@@ -1130,7 +1141,7 @@ fn egui_ui_system(
                     } else {
                         (grid_config.size + 8).min(256)
                     };
-                    *regenerate_request = true;
+                    *regenerate_request = RegenRequest::Debounce(Instant::now());
                 }
             });
 
@@ -1146,7 +1157,7 @@ fn egui_ui_system(
                     .changed()
                 {
                     grid_config.voxel_size = vs as f64;
-                    *regenerate_request = true;
+                    *regenerate_request = RegenRequest::Debounce(Instant::now());
                 }
             });
 
@@ -1179,7 +1190,7 @@ fn egui_ui_system(
                             }
                         }
                     }
-                    *regenerate_request = true;
+                    *regenerate_request = RegenRequest::Debounce(Instant::now());
                 }
             });
 
@@ -1248,7 +1259,7 @@ fn egui_ui_system(
                 dim_mapping.x_dim = x_dim;
                 dim_mapping.y_dim = y_dim;
                 dim_mapping.z_dim = z_dim;
-                *regenerate_request = true;
+                *regenerate_request = RegenRequest::Debounce(Instant::now());
             }
 
             // Fixed values for non-spatial dims
@@ -1270,7 +1281,7 @@ fn egui_ui_system(
                             )
                             .changed()
                         {
-                            *regenerate_request = true;
+                            *regenerate_request = RegenRequest::Debounce(Instant::now());
                         }
                     });
                 }
@@ -1279,7 +1290,7 @@ fn egui_ui_system(
             ui.separator();
 
             if ui.button("Regenerate").clicked() {
-                *regenerate_request = true;
+                *regenerate_request = RegenRequest::Force;
             }
 
             ui.checkbox(&mut auto_regen.enabled, "Auto Regenerate");
@@ -1350,7 +1361,7 @@ fn egui_ui_system(
                 });
                 if changed {
                     dim_mapping.world_offset = (ox, oy, oz);
-                    *regenerate_request = true;
+                    *regenerate_request = RegenRequest::Debounce(Instant::now());
                 }
             });
 
@@ -1434,10 +1445,14 @@ fn egui_ui_system(
             }
         });
 
-    let should_regenerate = *regenerate_request || auto_regen.enabled;
-    *regenerate_request = false;
-
+    let should_regenerate = auto_regen.enabled
+        || match *regenerate_request {
+            RegenRequest::None => false,
+            RegenRequest::Debounce(t) => t.elapsed() >= REGEN_DEBOUNCE,
+            RegenRequest::Force => true,
+        };
     if should_regenerate {
+        *regenerate_request = RegenRequest::None;
         let total_start = Instant::now();
         let (composite, count, gen_timings) =
             generate_voxels(&grid_config, &expr_config, &mut expr_status, &dim_mapping);
