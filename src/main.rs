@@ -863,6 +863,10 @@ fn egui_overlays_system(
             ui.checkbox(&mut show_axes_planes.show_axes, "Show Axes");
             ui.checkbox(&mut show_axes_planes.show_ground_grid, "Show Ground Grid");
             ui.checkbox(&mut show_axes_planes.show_planes, "Show Reference Planes");
+            ui.separator();
+            ui.colored_label(egui::Color32::from_rgb(255, 51, 51), "X — red");
+            ui.colored_label(egui::Color32::from_rgb(51, 255, 51), "Y — green");
+            ui.colored_label(egui::Color32::from_rgb(51, 51, 255), "Z — blue");
         });
 }
 
@@ -870,6 +874,7 @@ fn draw_axes_and_planes(
     mut gizmos: Gizmos,
     grid_config: Res<GridConfig>,
     show: Res<ShowAxesPlanes>,
+    camera_query: Query<&Transform, With<Camera3d>>,
 ) {
     let inv_size = 1.0 / grid_config.size as f32;
     let n = grid_config.size;
@@ -891,6 +896,22 @@ fn draw_axes_and_planes(
             Vec3::new(0.0, 0.0, 0.5),
             Color::srgb(0.2, 0.2, 1.0),
         );
+
+        let cam_t = camera_query.iter().next().cloned().unwrap_or_default();
+
+        for (pos, label, color) in [
+            (Vec3::new(0.55, 0.0, 0.0), "X", Color::srgb(1.0, 0.2, 0.2)),
+            (Vec3::new(0.0, 0.55, 0.0), "Y", Color::srgb(0.2, 1.0, 0.2)),
+            (Vec3::new(0.0, 0.0, 0.55), "Z", Color::srgb(0.2, 0.2, 1.0)),
+        ] {
+            let view_dir = (cam_t.translation - pos).normalize();
+            let cam_up = cam_t.rotation * Vec3::Y;
+            let right = cam_up.cross(view_dir).normalize();
+            let up = view_dir.cross(right);
+            let rot = Quat::from_mat3(&Mat3::from_cols(right, up, view_dir));
+            let isometry = Isometry3d::new(pos, rot);
+            gizmos.text(isometry, label, 0.04, Vec2::ZERO, color);
+        }
     }
 
     if show.show_ground_grid {
