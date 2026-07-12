@@ -73,6 +73,11 @@ fn first_bad_offset(step: f64) -> f64 {
     }
 }
 
+/// Largest `voxel_size` where `first_bad_offset(v)` stays finite.
+/// Bound: `v * 2^53 < f64::MAX` → `v < f64::MAX / 2^53`.
+/// One ULP below that threshold to avoid `first_bad_offset` returning ∞.
+const MAX_VOXEL_SIZE: f64 = (f64::MAX / (1u64 << f64::MANTISSA_DIGITS) as f64).next_down();
+
 type Vec3Arr = [f32; 3];
 type IVec3Arr = [i32; 3];
 type CornerArr = [Vec3Arr; 4];
@@ -1168,16 +1173,18 @@ fn egui_ui_system(
 
             ui.label("Voxel Size:");
             ui.horizontal(|ui| {
-                let mut vs = grid_config.voxel_size as f32;
                 if ui
                     .add(
-                        egui::Slider::new(&mut vs, 0.1..=10.0)
-                            .logarithmic(true)
-                            .custom_formatter(|n, _| format!("{n:.2}")),
+                        egui::DragValue::new(&mut grid_config.voxel_size)
+                            .speed(0.0)
+                            .custom_formatter(|val, _| {
+                                let s = format!("{:.6}", val);
+                                s.trim_end_matches('0').trim_end_matches('.').to_string()
+                            })
+                            .range(f64::MIN_POSITIVE..=MAX_VOXEL_SIZE),
                     )
                     .changed()
                 {
-                    grid_config.voxel_size = vs as f64;
                     *regenerate_request = RegenRequest::Debounce(Instant::now());
                 }
             });
