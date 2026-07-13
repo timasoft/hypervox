@@ -1041,6 +1041,7 @@ fn egui_ui_system(
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     let mut remove_idx = None;
+                    let mut duplicate_idx = None;
                     for (idx, entry) in expr_config.entries.iter_mut().enumerate() {
                         egui::CollapsingHeader::new(format!("Function #{}", idx + 1))
                             .id_salt(("func_header", idx))
@@ -1072,9 +1073,14 @@ fn egui_ui_system(
                                     }
                                 });
 
-                                if ui.small_button("❌ Remove").clicked() {
-                                    remove_idx = Some(idx);
-                                }
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("📋 Duplicate").clicked() {
+                                        duplicate_idx = Some(idx);
+                                    }
+                                    if ui.small_button("❌ Remove").clicked() {
+                                        remove_idx = Some(idx);
+                                    }
+                                });
                             });
                         ui.separator();
                     }
@@ -1082,6 +1088,12 @@ fn egui_ui_system(
                     // Apply removals after iteration to avoid borrow issues
                     if let Some(idx) = remove_idx {
                         expr_config.entries.remove(idx);
+                        *regenerate_request = RegenRequest::Debounce(Instant::now());
+                    }
+
+                    if let Some(idx) = duplicate_idx {
+                        let entry = expr_config.entries[idx].clone();
+                        expr_config.entries.insert(idx + 1, entry);
                         *regenerate_request = RegenRequest::Debounce(Instant::now());
                     }
                 });
