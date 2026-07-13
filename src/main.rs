@@ -1042,6 +1042,9 @@ fn egui_ui_system(
                 .show(ui, |ui| {
                     let mut remove_idx = None;
                     let mut duplicate_idx = None;
+                    let mut move_up_idx = None;
+                    let mut move_down_idx = None;
+                    let entries_len = expr_config.entries.len();
                     for (idx, entry) in expr_config.entries.iter_mut().enumerate() {
                         egui::CollapsingHeader::new(format!("Function #{}", idx + 1))
                             .id_salt(("func_header", idx))
@@ -1074,6 +1077,12 @@ fn egui_ui_system(
                                 });
 
                                 ui.horizontal(|ui| {
+                                    if idx > 0 && ui.small_button("⬆").clicked() {
+                                        move_up_idx = Some(idx);
+                                    }
+                                    if idx < entries_len - 1 && ui.small_button("⬇").clicked() {
+                                        move_down_idx = Some(idx);
+                                    }
                                     if ui.small_button("📋 Duplicate").clicked() {
                                         duplicate_idx = Some(idx);
                                     }
@@ -1094,6 +1103,16 @@ fn egui_ui_system(
                     if let Some(idx) = duplicate_idx {
                         let entry = expr_config.entries[idx].clone();
                         expr_config.entries.insert(idx + 1, entry);
+                        *regenerate_request = RegenRequest::Debounce(Instant::now());
+                    }
+
+                    if let Some(idx) = move_up_idx {
+                        expr_config.entries.swap(idx, idx - 1);
+                        *regenerate_request = RegenRequest::Debounce(Instant::now());
+                    }
+
+                    if let Some(idx) = move_down_idx {
+                        expr_config.entries.swap(idx, idx + 1);
                         *regenerate_request = RegenRequest::Debounce(Instant::now());
                     }
                 });
