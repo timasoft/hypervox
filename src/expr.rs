@@ -49,149 +49,140 @@ pub enum Node {
 
 pub type CompiledExpr = Box<dyn Fn(&[f64], &mut [f64]) -> f64 + Send + Sync>;
 
-#[derive(Debug, Clone, Copy)]
-pub enum F0 {
-    PI,
-    E,
-}
-
-impl F0 {
-    pub fn to_num(self) -> f64 {
-        match self {
-            Self::PI => std::f64::consts::PI,
-            Self::E => std::f64::consts::E,
+macro_rules! define_f0 {
+    ($($variant:ident => $str:literal = $body:expr),* $(,)?) => {
+        #[derive(Debug, Clone, Copy)]
+        pub enum F0 {
+            $($variant,)*
         }
-    }
-}
-
-impl FromStr for F0 {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "PI" => Ok(Self::PI),
-            "E" => Ok(Self::E),
-            _ => Err(format!("unknown const '{s}'")),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum F1 {
-    Sin,
-    Cos,
-    Tan,
-    Asin,
-    Acos,
-    Atan,
-    Sinh,
-    Cosh,
-    Tanh,
-    Sqrt,
-    Cbrt,
-    Exp,
-    Ln,
-    Log10,
-    Log2,
-    Floor,
-    Ceil,
-    Round,
-    Trunc,
-    Abs,
-}
-
-impl F1 {
-    #[inline]
-    pub fn to_fn(self) -> fn(f64) -> f64 {
-        match self {
-            Self::Sin => f64::sin,
-            Self::Cos => f64::cos,
-            Self::Tan => f64::tan,
-            Self::Asin => f64::asin,
-            Self::Acos => f64::acos,
-            Self::Atan => f64::atan,
-            Self::Sinh => f64::sinh,
-            Self::Cosh => f64::cosh,
-            Self::Tanh => f64::tanh,
-            Self::Sqrt => f64::sqrt,
-            Self::Cbrt => f64::cbrt,
-            Self::Exp => f64::exp,
-            Self::Ln => f64::ln,
-            Self::Log10 => f64::log10,
-            Self::Log2 => f64::log2,
-            Self::Floor => f64::floor,
-            Self::Ceil => f64::ceil,
-            Self::Round => f64::round,
-            Self::Trunc => f64::trunc,
-            Self::Abs => f64::abs,
-        }
-    }
-}
-
-impl FromStr for F1 {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "sin" => Ok(Self::Sin),
-            "cos" => Ok(Self::Cos),
-            "tan" => Ok(Self::Tan),
-            "asin" => Ok(Self::Asin),
-            "acos" => Ok(Self::Acos),
-            "atan" => Ok(Self::Atan),
-            "sinh" => Ok(Self::Sinh),
-            "cosh" => Ok(Self::Cosh),
-            "tanh" => Ok(Self::Tanh),
-            "sqrt" => Ok(Self::Sqrt),
-            "cbrt" => Ok(Self::Cbrt),
-            "exp" => Ok(Self::Exp),
-            "ln" => Ok(Self::Ln),
-            "log10" => Ok(Self::Log10),
-            "log2" => Ok(Self::Log2),
-            "floor" => Ok(Self::Floor),
-            "ceil" => Ok(Self::Ceil),
-            "round" => Ok(Self::Round),
-            "trunc" => Ok(Self::Trunc),
-            "abs" => Ok(Self::Abs),
-            _ => Err(format!("unknown function '{s}'")),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum F2 {
-    Atan2,
-    Pow,
-}
-
-impl F2 {
-    #[inline]
-    pub fn to_fn(self) -> fn(f64, f64) -> f64 {
-        match self {
-            Self::Atan2 => f64::atan2,
-            Self::Pow => |a, b| {
-                if a == 0.0 && b == 0.0 {
-                    1.0
-                } else {
-                    let exp_int = b as i32;
-                    if (exp_int as f64) == b {
-                        a.powi(exp_int)
-                    } else {
-                        a.powf(b)
-                    }
+        impl F0 {
+            pub fn to_num(self) -> f64 {
+                match self {
+                    $(Self::$variant => $body,)*
                 }
-            },
+            }
+            pub const NAMES: &'static [&'static str] = &[$($str,)*];
         }
-    }
+        impl FromStr for F0 {
+            type Err = String;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($str => Ok(Self::$variant),)*
+                    _ => Err(format!("unknown const '{s}'")),
+                }
+            }
+        }
+    };
 }
 
-impl FromStr for F2 {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "atan2" => Ok(Self::Atan2),
-            "pow" => Ok(Self::Pow),
-            _ => Err(format!("unknown function '{s}'")),
+macro_rules! define_f1 {
+    ($($variant:ident => $str:literal = $body:expr),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum F1 {
+            $($variant,)*
         }
-    }
+        impl F1 {
+            #[inline]
+            pub fn to_fn(self) -> fn(f64) -> f64 {
+                match self {
+                    $(Self::$variant => $body,)*
+                }
+            }
+            pub const NAMES: &'static [&'static str] = &[$($str,)*];
+        }
+        impl FromStr for F1 {
+            type Err = String;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($str => Ok(Self::$variant),)*
+                    _ => Err(format!("unknown function '{s}'")),
+                }
+            }
+        }
+    };
+}
+
+macro_rules! define_f2 {
+    ($($variant:ident => $str:literal = $body:expr),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum F2 {
+            $($variant,)*
+        }
+        impl F2 {
+            #[inline]
+            pub fn to_fn(self) -> fn(f64, f64) -> f64 {
+                match self {
+                    $(Self::$variant => $body,)*
+                }
+            }
+            pub const NAMES: &'static [&'static str] = &[$($str,)*];
+        }
+        impl FromStr for F2 {
+            type Err = String;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($str => Ok(Self::$variant),)*
+                    _ => Err(format!("unknown function '{s}'")),
+                }
+            }
+        }
+    };
+}
+
+define_f0! {
+    PI => "PI" = std::f64::consts::PI,
+    E => "E" = std::f64::consts::E,
+}
+
+define_f1! {
+    Sin => "sin" = f64::sin,
+    Cos => "cos" = f64::cos,
+    Tan => "tan" = f64::tan,
+    Asin => "asin" = f64::asin,
+    Acos => "acos" = f64::acos,
+    Atan => "atan" = f64::atan,
+    Sinh => "sinh" = f64::sinh,
+    Cosh => "cosh" = f64::cosh,
+    Tanh => "tanh" = f64::tanh,
+    Sqrt => "sqrt" = f64::sqrt,
+    Cbrt => "cbrt" = f64::cbrt,
+    Exp => "exp" = f64::exp,
+    Ln => "ln" = f64::ln,
+    Log10 => "log10" = f64::log10,
+    Log2 => "log2" = f64::log2,
+    Floor => "floor" = f64::floor,
+    Ceil => "ceil" = f64::ceil,
+    Round => "round" = f64::round,
+    Trunc => "trunc" = f64::trunc,
+    Abs => "abs" = f64::abs,
+}
+
+define_f2! {
+    Atan2 => "atan2" = f64::atan2,
+    Pow => "pow" = |a, b| {
+        if a == 0.0 && b == 0.0 {
+            1.0
+        } else {
+            let exp_int = b as i32;
+            if (exp_int as f64) == b {
+                a.powi(exp_int)
+            } else {
+                a.powf(b)
+            }
+        }
+    },
+}
+
+pub fn f0_list() -> String {
+    F0::NAMES.join(", ")
+}
+
+pub fn f1_list() -> String {
+    F1::NAMES.join(", ")
+}
+
+pub fn f2_list() -> String {
+    F2::NAMES.join(", ")
 }
 
 pub struct InvariantGroup {

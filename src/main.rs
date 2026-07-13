@@ -1170,6 +1170,20 @@ fn egui_ui_system(
                 );
             }
 
+            egui::CollapsingHeader::new("Available functions")
+                .default_open(false)
+                .id_salt("functions_help")
+                .show(ui, |ui| {
+                    ui.strong("Constants:");
+                    ui.label(expr::f0_list());
+                    ui.separator();
+                    ui.strong("Functions (1 arg):");
+                    ui.label(expr::f1_list());
+                    ui.separator();
+                    ui.strong("Functions (2 arg):");
+                    ui.label(expr::f2_list());
+                });
+
             ui.separator();
 
             ui.label("Grid Size:");
