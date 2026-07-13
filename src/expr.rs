@@ -39,6 +39,7 @@ pub enum Node {
     Mul(Box<Node>, Box<Node>),
     Div(Box<Node>, Box<Node>),
     Pow(Box<Node>, Box<Node>),
+    Mod(Box<Node>, Box<Node>),
     F1(F1, Box<Node>),
     F2(F2, Box<Node>, Box<Node>),
     /// let slot_i = expr in body
@@ -430,6 +431,41 @@ impl Node {
                     _ => {}
                 }
             }
+            Node::Mod(a, b) => {
+                a.pre_eval(vars);
+                b.pre_eval(vars);
+                match (a.as_ref(), b.as_ref()) {
+                    (Node::Num(x), Node::Num(y)) => *self = Node::Num(x % y),
+                    _ if *a == *b => {
+                        // x % x => 0
+                        *self = Node::Num(0.0);
+                    }
+                    (Node::Num(x), _) if *x == 0.0 => {
+                        // 0 % x => 0
+                        *self = Node::Num(0.0);
+                    }
+                    (Node::Neg(a_inner), Node::Neg(b_inner)) => {
+                        // (-a) % (-b) = -(a % b)
+                        let mut new =
+                            Node::Neg(Box::new(Node::Mod(a_inner.clone(), b_inner.clone())));
+                        new.pre_eval(vars);
+                        *self = new;
+                    }
+                    (_, Node::Neg(b_inner)) => {
+                        // a % (-b) = a % b  (sign of divisor doesn't affect result)
+                        let mut new = Node::Mod(a.clone(), b_inner.clone());
+                        new.pre_eval(vars);
+                        *self = new;
+                    }
+                    (Node::Neg(a_inner), _) => {
+                        // (-a) % b = -(a % b)
+                        let mut new = Node::Neg(Box::new(Node::Mod(a_inner.clone(), b.clone())));
+                        new.pre_eval(vars);
+                        *self = new;
+                    }
+                    _ => {}
+                }
+            }
             Node::F1(f, a) => {
                 a.pre_eval(vars);
                 if let Node::Num(x) = a.as_ref() {
@@ -480,6 +516,7 @@ impl Node {
             | Node::Mul(a, b)
             | Node::Div(a, b)
             | Node::Pow(a, b)
+            | Node::Mod(a, b)
             | Node::F2(_, a, b) => a.cse_slots().max(b.cse_slots()),
             Node::F1(_, a) => a.cse_slots(),
             Node::Num(_) | Node::Var(_) => 0,
@@ -560,6 +597,7 @@ impl Node {
             | Node::Mul(a, b)
             | Node::Div(a, b)
             | Node::Pow(a, b)
+            | Node::Mod(a, b)
             | Node::F2(_, a, b) => {
                 out.push(node);
                 Self::cse_collect_non_trivial(a, out);
@@ -585,6 +623,7 @@ impl Node {
             | Node::Mul(a, b)
             | Node::Div(a, b)
             | Node::Pow(a, b)
+            | Node::Mod(a, b)
             | Node::F2(_, a, b) => {
                 a.cse_replace_all(pattern, slot);
                 b.cse_replace_all(pattern, slot);
@@ -607,6 +646,7 @@ impl Node {
             | Node::Mul(a, b)
             | Node::Div(a, b)
             | Node::Pow(a, b)
+            | Node::Mod(a, b)
             | Node::F2(_, a, b) => a.depends_on() | b.depends_on(),
             Node::Let(_, expr, body) => expr.depends_on() | body.depends_on(),
             Node::CseRef(_, deps) => *deps,
@@ -703,6 +743,11 @@ impl Node {
                     }
                 })
             }
+            Node::Mod(a, b) => {
+                let a_fn = a.compile();
+                let b_fn = b.compile();
+                Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) % b_fn(vars, cse))
+            }
             Node::F1(f, a) => {
                 let f = f.to_fn();
                 let a_fn = a.compile();
@@ -773,6 +818,7 @@ impl Node {
                 | Node::Mul(a, b)
                 | Node::Div(a, b)
                 | Node::Pow(a, b)
+                | Node::Mod(a, b)
                 | Node::F2(_, a, b) => {
                     a.collect_invariants(invariant_mask, slot, pieces);
                     b.collect_invariants(invariant_mask, slot, pieces);
@@ -825,6 +871,7 @@ impl Node {
                 | Node::Mul(a, b)
                 | Node::Div(a, b)
                 | Node::Pow(a, b)
+                | Node::Mod(a, b)
                 | Node::F2(_, a, b) => {
                     a.fold_cse_aliases();
                     b.fold_cse_aliases();
@@ -847,6 +894,7 @@ impl Node {
             | Node::Mul(a, b)
             | Node::Div(a, b)
             | Node::Pow(a, b)
+            | Node::Mod(a, b)
             | Node::F2(_, a, b) => {
                 a.remap_cse_slot(old_slot, new_slot);
                 b.remap_cse_slot(old_slot, new_slot);
@@ -916,6 +964,8 @@ enum Token {
     Star,
     Slash,
     Caret,
+    Percent,
+    Pipe,
     LParen,
     RParen,
     Comma,
@@ -932,6 +982,8 @@ impl Display for Token {
             Token::Star => write!(f, "'*'"),
             Token::Slash => write!(f, "'/'"),
             Token::Caret => write!(f, "'^'"),
+            Token::Percent => write!(f, "'%'"),
+            Token::Pipe => write!(f, "'|'"),
             Token::LParen => write!(f, "'('"),
             Token::RParen => write!(f, "')'"),
             Token::Comma => write!(f, "','"),
@@ -1003,6 +1055,14 @@ impl Lexer {
             '/' => {
                 self.advance();
                 Ok(Token::Slash)
+            }
+            '%' => {
+                self.advance();
+                Ok(Token::Percent)
+            }
+            '|' => {
+                self.advance();
+                Ok(Token::Pipe)
             }
             '^' => {
                 self.advance();
@@ -1148,13 +1208,14 @@ impl<'a> Parser<'a> {
 
     fn parse_term(&mut self) -> Result<Node, String> {
         let mut left = self.parse_unary()?;
-        while matches!(self.current, Token::Star | Token::Slash) {
+        while matches!(self.current, Token::Star | Token::Slash | Token::Percent) {
             let op = std::mem::replace(&mut self.current, Token::Eof);
             self.advance()?;
             let right = self.parse_unary()?;
             left = match op {
                 Token::Star => Node::Mul(Box::new(left), Box::new(right)),
                 Token::Slash => Node::Div(Box::new(left), Box::new(right)),
+                Token::Percent => Node::Mod(Box::new(left), Box::new(right)),
                 _ => unreachable!(),
             };
         }
@@ -1210,6 +1271,15 @@ impl<'a> Parser<'a> {
                 }
                 self.advance()?;
                 Ok(node)
+            }
+            Token::Pipe => {
+                self.advance()?;
+                let node = self.parse_expr()?;
+                if !matches!(self.current, Token::Pipe) {
+                    return Err(self.err_at(format!("expected '|' but found {}", self.current)));
+                }
+                self.advance()?;
+                Ok(Node::F1(F1::Abs, Box::new(node)))
             }
             _ => Err(self.err_at(format!("unexpected token {}", self.current))),
         }
@@ -1873,6 +1943,108 @@ mod tests {
         assert!(parse("unknown", &dim).is_err());
         assert!(parse("sin()", &dim).is_err());
         assert!(parse("atan2(x)", &dim).is_err());
+    }
+
+    #[test]
+    fn test_percent_modulo() {
+        let dim = DimConfig::default();
+        let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v, &mut []);
+        assert_eq!(e("5 % 3", &[]), 2.0);
+        assert_eq!(e("7 % 3.5", &[]), 0.0);
+        assert_eq!(e("10 % 4", &[]), 2.0);
+        assert_eq!(e("x % y", &[10.0, 3.0, 0.0]), 1.0);
+        assert_eq!(e("x % 2", &[5.0, 0.0, 0.0]), 1.0);
+    }
+
+    #[test]
+    fn test_pipe_abs() {
+        let dim = DimConfig::default();
+        let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v, &mut []);
+        assert_eq!(e("|x|", &[-5.0, 0.0, 0.0]), 5.0);
+        assert_eq!(e("|x|", &[3.0, 0.0, 0.0]), 3.0);
+        assert_eq!(e("|x + y|", &[2.0, -3.0, 0.0]), 1.0);
+        assert_eq!(e("|x| * |y|", &[-2.0, -3.0, 0.0]), 6.0);
+        assert_eq!(e("-|x|", &[-5.0, 0.0, 0.0]), -5.0);
+        assert_eq!(e("|x|^2", &[-3.0, 0.0, 0.0]), 9.0);
+        assert_eq!(e("||x||", &[-5.0, 0.0, 0.0]), 5.0);
+    }
+
+    #[test]
+    fn test_pipe_abs_pre_eval() {
+        let dim = DimConfig::default();
+        let pe = |s: &str| {
+            let mut n = parse(s, &dim).unwrap();
+            n.pre_eval(&[]);
+            n
+        };
+        // |5| = 5
+        assert_eq!(pe("|5|"), Node::Num(5.0));
+        // |-3| = 3
+        assert_eq!(pe("|-3|"), Node::Num(3.0));
+        // abs(abs(x)) = abs(x) (idempotent)
+        let mut n = parse("||x||", &dim).unwrap();
+        n.pre_eval(&[]);
+        assert_eq!(n, Node::F1(F1::Abs, Box::new(Node::Var(0))));
+    }
+
+    #[test]
+    fn test_percent_pre_eval() {
+        let dim = DimConfig::default();
+        let pe = |s: &str| {
+            let mut n = parse(s, &dim).unwrap();
+            n.pre_eval(&[]);
+            n
+        };
+        assert_eq!(pe("10 % 3"), Node::Num(1.0));
+        // x % x => 0
+        let n = pe("x % x");
+        assert_eq!(n, Node::Num(0.0));
+        let n = pe("(x+y) % (x+y)");
+        assert_eq!(n, Node::Num(0.0));
+        // 0 % x => 0
+        let n = pe("0 % x");
+        assert_eq!(n, Node::Num(0.0));
+        // a % (-b) => a % b
+        let n = pe("x % -y");
+        assert_eq!(n, Node::Mod(Box::new(Node::Var(0)), Box::new(Node::Var(1))));
+        // (-a) % b => -(a % b)
+        let n = pe("-x % y");
+        assert_eq!(
+            n,
+            Node::Neg(Box::new(Node::Mod(
+                Box::new(Node::Var(0)),
+                Box::new(Node::Var(1)),
+            )))
+        );
+        // (-a) % (-b) => -(a % b)
+        let n = pe("-x % -y");
+        assert_eq!(
+            n,
+            Node::Neg(Box::new(Node::Mod(
+                Box::new(Node::Var(0)),
+                Box::new(Node::Var(1)),
+            )))
+        );
+    }
+
+    #[test]
+    fn test_percent_runtime_optimizations() {
+        let dim = DimConfig::default();
+        let e = |s: &str, v: &[f64]| {
+            let mut n = parse(s, &dim).unwrap();
+            n.pre_eval(&v.iter().copied().map(Some).collect::<Vec<_>>());
+            n.compile()(v, &mut [])
+        };
+        // x % x = 0
+        assert_eq!(e("x % x", &[5.0, 0.0, 0.0]), 0.0);
+        // 0 % x = 0
+        assert_eq!(e("0 % x", &[5.0, 0.0, 0.0]), 0.0);
+        // (-a) % b = -(a % b)
+        assert_eq!(e("-x % y", &[10.0, 3.0, 0.0]), -(10.0 % 3.0));
+        // a % (-b) = a % b
+        assert_eq!(e("x % -y", &[10.0, 3.0, 0.0]), 10.0 % 3.0);
+        // (-a) % (-b) = -(a % b)
+        assert_eq!(e("-x % -y", &[10.0, 3.0, 0.0]), -(10.0 % 3.0));
     }
 
     #[test]
