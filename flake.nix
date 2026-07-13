@@ -74,7 +74,7 @@
       };
 
       native = craneLib.buildPackage {
-        pname = "ndvoxgcalc";
+        pname = "hypervox";
         version = "0.1.0";
         inherit src;
         inherit cargoVendorDir;
@@ -92,8 +92,8 @@
         };
 
         postFixup = ''
-          if [ -x "$out/bin/ndvoxgcalc" ]; then
-            wrapProgram "$out/bin/ndvoxgcalc" \
+          if [ -x "$out/bin/hypervox" ]; then
+            wrapProgram "$out/bin/hypervox" \
               --prefix LD_LIBRARY_PATH : "${libPath}" \
               --prefix LD_LIBRARY_PATH : /run/opengl-driver/lib
           fi
@@ -110,7 +110,7 @@
       };
 
       web = craneLib.buildTrunkPackage {
-        pname = "ndvoxgcalc-web";
+        pname = "hypervox-web";
         version = "0.1.0";
         inherit src;
         inherit cargoVendorDir;
@@ -152,7 +152,7 @@ EOF
       apps = {
         native = flake-utils.lib.mkApp {
           drv = native;
-          exePath = "/bin/ndvoxgcalc";
+          exePath = "/bin/hypervox";
         };
         default = self.apps.${system}.native;
       };

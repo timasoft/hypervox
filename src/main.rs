@@ -373,7 +373,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "NDVoxGCalc".into(),
+                title: "HyperVox".into(),
                 mode: WindowMode::BorderlessFullscreen(MonitorSelection::Current),
                 resolution: WindowResolution::default(),
                 present_mode: PresentMode::Fifo,
