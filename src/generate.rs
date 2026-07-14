@@ -5,7 +5,6 @@ use web_time::Instant;
 
 use bevy::prelude::*;
 
-use crate::expr;
 use crate::math;
 use crate::math::DimConfig;
 use crate::utils::{
@@ -44,7 +43,7 @@ pub fn generate_voxels(
         }
 
         let parse_start = Instant::now();
-        if let Err(e) = expr::validate(&entry.expr, &DimConfig::from(dim_mapping)) {
+        if let Err(e) = hypervox_expr::validate(&entry.expr, &DimConfig::from(dim_mapping)) {
             timings.parse_ms += parse_start.elapsed().as_secs_f64() * 1000.0;
             expr_status.is_valid = false;
             expr_status

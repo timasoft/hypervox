@@ -6,6 +6,7 @@ use bevy::{
 };
 use bevy_egui::{EguiContexts, egui};
 use bevy_panorbit_camera::PanOrbitCamera;
+use hypervox_expr::{f0_list, f1_list, f2_list};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
@@ -18,8 +19,6 @@ use crate::utils::{
     ExpressionEntry, ExpressionStatus, GridConfig, MAX_VOXEL_SIZE, ProfilingData,
     RegenerateEveryFrame, SceneEntities, ShowAxesPlanes, first_bad_offset, parallel_available,
 };
-
-use crate::expr;
 
 const REGEN_DEBOUNCE: Duration = Duration::from_millis(300);
 
@@ -252,13 +251,13 @@ pub fn egui_ui_system(
                 .id_salt("functions_help")
                 .show(ui, |ui| {
                     ui.strong("Constants:");
-                    ui.label(expr::f0_list());
+                    ui.label(f0_list());
                     ui.separator();
                     ui.strong("Functions (1 arg):");
-                    ui.label(expr::f1_list());
+                    ui.label(f1_list());
                     ui.separator();
                     ui.strong("Functions (2 arg):");
-                    ui.label(expr::f2_list());
+                    ui.label(f2_list());
                 });
 
             ui.separator();

@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "expr"]
+resolver = "2"
+
 [package]
 name = "hypervox"
 version = "0.1.0"
@@ -12,6 +16,7 @@ debug = false
 overflow-checks = false
 
 [dependencies]
+hypervox_expr = { path = "expr" }
 bevy = { version = "0.19.0", default-features = false, features = [
     "bevy_pbr",
     "bevy_gizmos_render",

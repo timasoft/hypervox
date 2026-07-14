@@ -2881,6 +2881,7 @@ dependencies = [
  "bevy_egui",
  "bevy_panorbit_camera",
  "getrandom 0.4.3",
+ "hypervox_expr",
  "js-sys",
  "rand",
  "rayon",
@@ -2890,6 +2891,10 @@ dependencies = [
  "web-sys",
  "web-time",
 ]
+
+[[package]]
+name = "hypervox_expr"
+version = "0.1.0"
 
 [[package]]
 name = "icu_collections"

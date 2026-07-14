@@ -29,7 +29,6 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 
-mod expr;
 mod generate;
 mod math;
 mod mesh;

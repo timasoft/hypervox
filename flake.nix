@@ -44,7 +44,7 @@
       src = pkgs.lib.fileset.toSource {
         root = ./.;
         fileset = pkgs.lib.fileset.unions [
-          ./Cargo.toml ./Cargo.lock ./Trunk.toml ./index.html ./src
+          ./Cargo.toml ./Cargo.lock ./Trunk.toml ./index.html ./src ./expr
           (pkgs.lib.fileset.maybeMissing ./.cargo)
           (pkgs.lib.fileset.maybeMissing ./assets)
         ];

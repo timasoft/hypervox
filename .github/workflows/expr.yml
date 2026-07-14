@@ -1,0 +1,69 @@
+name: Expr
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - 'expr/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'expr/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build
+        run: nix develop . --command cargo build -p hypervox_expr --verbose
+
+      - name: Build release
+        run: nix develop . --command cargo build -p hypervox_expr --release --verbose
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run cargo test
+        run: nix develop . --command cargo test -p hypervox_expr --verbose
+
+  check:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run cargo clippy
+        run: nix develop . --command "cargo clippy -p hypervox_expr -- -Dwarnings && cargo clippy -p hypervox_expr --release -- -Dwarnings"
+
+      - name: Run cargo fmt
+        run: nix develop . --command cargo fmt --all --check

@@ -1,4 +1,5 @@
-use crate::{expr, utils::DimMapping};
+use crate::utils::DimMapping;
+use hypervox_expr::VarMap;
 use rayon::prelude::*;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -67,7 +68,7 @@ impl From<DimMapping> for DimConfig {
     }
 }
 
-impl expr::VarMap for DimConfig {
+impl VarMap for DimConfig {
     fn ndim(&self) -> usize {
         self.ndim
     }
@@ -109,7 +110,7 @@ pub fn generate_voxel_grid(
         ));
     }
 
-    let expr = expr::parse(expr_str, dim)?;
+    let expr = hypervox_expr::parse(expr_str, dim)?;
 
     let node_dim = size + 1;
     let node_dim_sq = node_dim * node_dim;
@@ -213,7 +214,7 @@ fn init_fixed_vars(dim: &DimConfig) -> [f64; MAX_NDIM] {
 
 fn compute_sign_grid(
     sign_grid: &mut [i8],
-    expr: &expr::Node,
+    expr: &hypervox_expr::Node,
     node_dim: usize,
     node_dim_sq: usize,
     step: f64,
@@ -263,7 +264,7 @@ fn compute_sign_grid(
 
 fn compute_sign_grid_par(
     sign_grid: &mut [i8],
-    expr: &expr::Node,
+    expr: &hypervox_expr::Node,
     node_dim: usize,
     node_dim_sq: usize,
     step: f64,
