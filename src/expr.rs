@@ -1387,6 +1387,14 @@ pub fn parse(expr_str: &str, dim_config: &DimConfig) -> Result<Node, String> {
     parser.parse()
 }
 
+pub fn validate(expr_str: &str, dim_config: &DimConfig) -> Result<(), String> {
+    let trimmed = expr_str.trim();
+    if trimmed.is_empty() {
+        return Err("Expression cannot be empty".into());
+    }
+    parse(trimmed, dim_config).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

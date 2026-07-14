@@ -1,5 +1,4 @@
-use crate::DimMapping;
-use crate::expr;
+use crate::{expr, utils::DimMapping};
 use rayon::prelude::*;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -39,6 +38,32 @@ pub struct DimConfig {
 impl Default for DimConfig {
     fn default() -> Self {
         DimMapping::default().into()
+    }
+}
+
+impl From<&DimMapping> for DimConfig {
+    fn from(value: &DimMapping) -> Self {
+        Self {
+            ndim: value.ndim,
+            x_dim: value.x_dim,
+            y_dim: value.y_dim,
+            z_dim: value.z_dim,
+            fixed: value.fixed.clone(),
+            world_offset: value.world_offset,
+        }
+    }
+}
+
+impl From<DimMapping> for DimConfig {
+    fn from(value: DimMapping) -> Self {
+        Self {
+            ndim: value.ndim,
+            x_dim: value.x_dim,
+            y_dim: value.y_dim,
+            z_dim: value.z_dim,
+            fixed: value.fixed,
+            world_offset: value.world_offset,
+        }
     }
 }
 
