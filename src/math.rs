@@ -67,6 +67,23 @@ impl From<DimMapping> for DimConfig {
     }
 }
 
+impl expr::VarMap for DimConfig {
+    fn ndim(&self) -> usize {
+        self.ndim
+    }
+    fn resolve_alias(&self, name: &str) -> Option<usize> {
+        match name {
+            "x" => Some(self.x_dim),
+            "y" => Some(self.y_dim),
+            "z" => Some(self.z_dim),
+            _ => None,
+        }
+    }
+    fn primary_prefix(&self) -> &str {
+        "x"
+    }
+}
+
 /// Generates a voxel grid of size `size^3` from an N-dimensional expression.
 /// - `expr_str`: mathematical expression in terms of x,y,z (spatial) and x0..x{N-1} (dims)
 /// - `base_color`: 24-bit RGB color (0xRRGGBB). Stored in grid as `base_color + 1`

@@ -4,7 +4,20 @@ use std::{
     str::FromStr,
 };
 
-use crate::math::DimConfig;
+/// Trait for resolving variable names in expressions.
+/// Implementors define variable aliases and the indexed-variable naming scheme.
+///
+/// Maximum `ndim` is 128 (limited by `u128` bitmask in `DepMask`).
+pub trait VarMap {
+    /// Number of dimensions (max 128, limited by `DepMask` bitmask).
+    fn ndim(&self) -> usize;
+
+    /// Resolve a variable alias (e.g. "x", "y", "z") to a dimension index.
+    fn resolve_alias(&self, name: &str) -> Option<usize>;
+
+    /// Primary variable prefix used for indexed variables (e.g. "x0", "x1", …).
+    fn primary_prefix(&self) -> &str;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DepMask(u128);
@@ -1147,15 +1160,15 @@ impl Lexer {
     }
 }
 
-struct Parser<'a> {
+struct Parser<'a, V: VarMap> {
     lexer: Lexer,
     current: Token,
     current_pos: usize,
-    dim_config: &'a DimConfig,
+    vars: &'a V,
 }
 
-impl<'a> Parser<'a> {
-    fn new(input: &str, dim_config: &'a DimConfig) -> Result<Self, String> {
+impl<'a, V: VarMap> Parser<'a, V> {
+    fn new(input: &str, vars: &'a V) -> Result<Self, String> {
         let mut lexer = Lexer::new(input);
         let current = lexer.next_token()?;
         let current_pos = lexer.token_start;
@@ -1163,7 +1176,7 @@ impl<'a> Parser<'a> {
             lexer,
             current,
             current_pos,
-            dim_config,
+            vars,
         })
     }
 
@@ -1260,7 +1273,7 @@ impl<'a> Parser<'a> {
                 if matches!(self.current, Token::LParen) {
                     self.parse_function_call(&name)
                 } else {
-                    Ok(resolve_ident(&name, self.current_pos + 1, self.dim_config)?)
+                    Ok(resolve_ident(&name, self.current_pos + 1, self.vars)?)
                 }
             }
             Token::LParen => {
@@ -1343,66 +1356,80 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn resolve_ident(name: &str, col: usize, dim_config: &DimConfig) -> Result<Node, String> {
+fn resolve_ident<V: VarMap>(name: &str, col: usize, vars: &V) -> Result<Node, String> {
     if let Ok(f) = F0::from_str(name) {
         return Ok(Node::Num(f.to_num()));
     };
 
     let err_prefix = format!("at column {col}");
 
-    match name {
-        "x" => Ok(Node::Var(dim_config.x_dim)),
-        "y" => Ok(Node::Var(dim_config.y_dim)),
-        "z" => Ok(Node::Var(dim_config.z_dim)),
-        s if s.starts_with('x') && s.len() > 1 => {
-            let rest = &s[1..];
-            let idx = rest.parse::<usize>().map_err(|_| {
-                if rest.chars().all(|c| c.is_ascii_digit()) {
-                    format!(
-                        "{}: variable '{s}' out of range: max index is {}",
-                        err_prefix,
-                        dim_config.ndim - 1
-                    )
-                } else {
-                    format!("{}: unknown identifier '{s}'", err_prefix)
-                }
-            })?;
-            if idx >= dim_config.ndim {
-                Err(format!(
-                    "{}: variable '{s}' out of range: max index is {}",
-                    err_prefix,
-                    dim_config.ndim - 1
-                ))
-            } else {
-                Ok(Node::Var(idx))
-            }
-        }
-        s => Err(format!("{}: unknown identifier '{s}'", err_prefix)),
+    if let Some(idx) = vars.resolve_alias(name) {
+        return Ok(Node::Var(idx));
     }
+
+    let primary = vars.primary_prefix();
+    if let Some(rest) = name.strip_prefix(primary)
+        && !rest.is_empty()
+        && let Ok(idx) = rest.parse::<usize>()
+    {
+        if idx < vars.ndim() {
+            return Ok(Node::Var(idx));
+        }
+        return Err(format!(
+            "{}: variable '{name}' out of range: max index is {}",
+            err_prefix,
+            vars.ndim() - 1
+        ));
+    }
+
+    Err(format!("{}: unknown identifier '{name}'", err_prefix))
 }
 
 /// Parse an expression string into a `Node` AST.
-pub fn parse(expr_str: &str, dim_config: &DimConfig) -> Result<Node, String> {
-    let parser = Parser::new(expr_str, dim_config)?;
+pub fn parse<V: VarMap>(expr_str: &str, vars: &V) -> Result<Node, String> {
+    let parser = Parser::new(expr_str, vars)?;
     parser.parse()
 }
 
-pub fn validate(expr_str: &str, dim_config: &DimConfig) -> Result<(), String> {
+pub fn validate(expr_str: &str, vars: &impl VarMap) -> Result<(), String> {
     let trimmed = expr_str.trim();
     if trimmed.is_empty() {
         return Err("Expression cannot be empty".into());
     }
-    parse(trimmed, dim_config).map(|_| ())
+    parse(trimmed, vars).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::DimConfig;
+
+    #[derive(Clone, Copy)]
+    struct TestVars {
+        ndim: usize,
+    }
+
+    impl VarMap for TestVars {
+        fn ndim(&self) -> usize {
+            self.ndim
+        }
+        fn resolve_alias(&self, name: &str) -> Option<usize> {
+            match name {
+                "x" => Some(0),
+                "y" => Some(if self.ndim > 1 { 1 } else { 0 }),
+                "z" => Some(if self.ndim > 2 { 2 } else { 0 }),
+                _ => None,
+            }
+        }
+        fn primary_prefix(&self) -> &str {
+            "x"
+        }
+    }
+
+    const D3: TestVars = TestVars { ndim: 3 };
 
     #[test]
     fn test_eval_basic_ops() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let e = |s: &str| parse(s, &dim).unwrap().compile()(&[], &mut []);
         assert_eq!(e("3 + 5"), 8.0);
         assert_eq!(e("10 - 7"), 3.0);
@@ -1416,7 +1443,7 @@ mod tests {
 
     #[test]
     fn test_eval_vars_funcs_consts() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v, &mut []);
         assert_eq!(e("x + y + z", &[1.0, 2.0, 3.0]), 6.0);
         assert_eq!(e("2 * x", &[5.0, 0.0, 0.0]), 10.0);
@@ -1431,7 +1458,7 @@ mod tests {
 
     #[test]
     fn test_pre_eval_simplify() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let pe = |s: &str, v: &[Option<f64>]| -> Node {
             let mut n = parse(s, &dim).unwrap();
             n.pre_eval(v);
@@ -1673,7 +1700,7 @@ mod tests {
 
     #[test]
     fn test_cse_basic() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let cse_eval = |s: &str, v: &[f64]| {
             let mut n = parse(s, &dim).unwrap();
             let (f, slots) = n.prepare(&[]);
@@ -1714,7 +1741,7 @@ mod tests {
 
     #[test]
     fn test_cse_nested() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let cse_eval = |s: &str, v: &[f64]| {
             let mut n = parse(s, &dim).unwrap();
             let (f, slots) = n.prepare(&[]);
@@ -1741,7 +1768,7 @@ mod tests {
 
     #[test]
     fn test_cse_multiple_extractions() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let cse_eval = |s: &str, v: &[f64]| {
             let mut n = parse(s, &dim).unwrap();
             let (f, slots) = n.prepare(&[]);
@@ -1769,7 +1796,7 @@ mod tests {
 
     #[test]
     fn test_cse_no_duplicates() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let mut n = parse("x + y + z", &dim).unwrap();
         n.pre_eval(&[]);
         n.cse();
@@ -1818,7 +1845,7 @@ mod tests {
 
     #[test]
     fn test_cse_vs_nocse() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let exprs = [
             ("simple", "x + y * z"),
             ("medium", "sin(x) + cos(y) * z^2 + sqrt(x*x + y*y)"),
@@ -1876,7 +1903,7 @@ mod tests {
 
     #[test]
     fn test_compile_patterns_fused() {
-        let dim = DimConfig::default();
+        let dim = D3;
 
         let cases = [
             // MulAdd: a*b + c
@@ -1944,7 +1971,7 @@ mod tests {
 
     #[test]
     fn test_parse_errors() {
-        let dim = DimConfig::default();
+        let dim = D3;
         assert!(parse("", &dim).is_err());
         assert!(parse("x + ", &dim).is_err());
         assert!(parse("(x + y", &dim).is_err());
@@ -1955,7 +1982,7 @@ mod tests {
 
     #[test]
     fn test_percent_modulo() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v, &mut []);
         assert_eq!(e("5 % 3", &[]), 2.0);
         assert_eq!(e("7 % 3.5", &[]), 0.0);
@@ -1966,7 +1993,7 @@ mod tests {
 
     #[test]
     fn test_pipe_abs() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v, &mut []);
         assert_eq!(e("|x|", &[-5.0, 0.0, 0.0]), 5.0);
         assert_eq!(e("|x|", &[3.0, 0.0, 0.0]), 3.0);
@@ -1979,7 +2006,7 @@ mod tests {
 
     #[test]
     fn test_pipe_abs_pre_eval() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let pe = |s: &str| {
             let mut n = parse(s, &dim).unwrap();
             n.pre_eval(&[]);
@@ -1997,7 +2024,7 @@ mod tests {
 
     #[test]
     fn test_percent_pre_eval() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let pe = |s: &str| {
             let mut n = parse(s, &dim).unwrap();
             n.pre_eval(&[]);
@@ -2037,7 +2064,7 @@ mod tests {
 
     #[test]
     fn test_percent_runtime_optimizations() {
-        let dim = DimConfig::default();
+        let dim = D3;
         let e = |s: &str, v: &[f64]| {
             let mut n = parse(s, &dim).unwrap();
             n.pre_eval(&v.iter().copied().map(Some).collect::<Vec<_>>());
@@ -2057,13 +2084,7 @@ mod tests {
 
     #[test]
     fn test_nd_variables() {
-        let dim = DimConfig {
-            ndim: 4,
-            x_dim: 1,
-            y_dim: 2,
-            z_dim: 3,
-            ..DimConfig::default()
-        };
+        let dim = TestVars { ndim: 4 };
         let e = |s: &str, v: &[f64]| parse(s, &dim).unwrap().compile()(v, &mut []);
         assert_eq!(e("x0", &[5.0, 0.0, 0.0, 0.0]), 5.0);
         assert_eq!(e("x3", &[0.0, 0.0, 0.0, 5.0]), 5.0);
