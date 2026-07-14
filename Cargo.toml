@@ -15,6 +15,10 @@ panic = "abort"
 debug = false
 overflow-checks = false
 
+[profile.release.package.hypervox_expr]
+opt-level = 3
+codegen-units = 1
+
 [dependencies]
 hypervox_expr = { path = "expr" }
 bevy = { version = "0.19.0", default-features = false, features = [
