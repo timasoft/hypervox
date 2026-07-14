@@ -23,8 +23,6 @@ use crate::utils::{
 };
 
 #[cfg(target_arch = "wasm32")]
-use std::sync::OnceLock;
-#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
