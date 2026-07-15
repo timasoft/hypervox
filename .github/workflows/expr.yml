@@ -65,5 +65,8 @@ jobs:
       - name: Run cargo clippy
         run: nix develop . --command "cargo clippy -p hypervox_expr -- -Dwarnings && cargo clippy -p hypervox_expr --release -- -Dwarnings"
 
+      - name: Check benchmarks compile
+        run: nix develop . --command cargo bench -p hypervox_expr --no-run --verbose
+
       - name: Run cargo fmt
         run: nix develop . --command cargo fmt --all --check

@@ -545,7 +545,6 @@ impl Node {
 
     /// Preparation pipeline: pre_eval, CSE, compile.
     /// Returns (compiled_expr, cse_slots).
-    #[cfg(test)]
     pub fn prepare(&mut self, vars: &[Option<f64>]) -> (CompiledExpr, usize) {
         self.pre_eval(vars);
         self.cse();

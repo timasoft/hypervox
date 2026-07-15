@@ -9,4 +9,15 @@ repository = "https://github.com/timasoft/hypervox"
 keywords = ["math", "expression", "parser", "compiler", "cse"]
 categories = ["mathematics", "parsing", "algorithms"]
 
+[features]
+slow-benches = []
+
 [dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+evalexpr = "13"
+
+[[bench]]
+name = "bench_expr"
+harness = false
