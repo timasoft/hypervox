@@ -107,6 +107,80 @@ where
     black_box(sum)
 }
 
+fn bench_compile_time(c: &mut Criterion, name: &str, expr_src: &str) {
+    let mut group = c.benchmark_group(format!("compile/{name}"));
+
+    group.bench_function("parse", |b| {
+        b.iter_batched(
+            || (),
+            |_| black_box(parse(expr_src, &D3).unwrap()),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("pre_eval", |b| {
+        b.iter_batched(
+            || parse(expr_src, &D3).unwrap(),
+            |mut node| black_box(node.pre_eval(&[])),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("cse", |b| {
+        b.iter_batched(
+            || {
+                let mut node = parse(expr_src, &D3).unwrap();
+                node.pre_eval(&[]);
+                node
+            },
+            |mut node| black_box(node.cse()),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("compile", |b| {
+        b.iter_batched(
+            || {
+                let mut node = parse(expr_src, &D3).unwrap();
+                node.pre_eval(&[]);
+                node
+            },
+            |node| black_box(node.compile()),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("compile_multi", |b| {
+        b.iter_batched(
+            || {
+                let mut node = parse(expr_src, &D3).unwrap();
+                node.pre_eval(&[]);
+                node
+            },
+            |mut node| black_box(node.compile_multi(&[0, 1, 2])),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("prepare", |b| {
+        b.iter_batched(
+            || parse(expr_src, &D3).unwrap(),
+            |mut node| black_box(node.prepare(&[])),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("prepare_multi", |b| {
+        b.iter_batched(
+            || parse(expr_src, &D3).unwrap(),
+            |mut node| black_box(node.prepare_multi(&[], &[0, 1, 2])),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
 fn bench_expression(
     c: &mut Criterion,
     name: &str,
@@ -202,6 +276,12 @@ fn register_fast(c: &mut Criterion) {
     }
 }
 
+fn register_compile(c: &mut Criterion) {
+    for case in CASES {
+        bench_compile_time(c, case.name, case.hx);
+    }
+}
+
 #[cfg_attr(not(feature = "slow-benches"), allow(dead_code))]
 mod evalexpr_bench {
     use super::*;
@@ -289,7 +369,7 @@ mod evalexpr_bench {
     }
 }
 
-criterion_group!(fast_benches, register_fast);
+criterion_group!(fast_benches, register_fast, register_compile);
 
 #[cfg(feature = "slow-benches")]
 criterion_group!(slow_benches, evalexpr_bench::register);
