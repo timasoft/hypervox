@@ -1,45 +1,19 @@
-use std::{
-    fmt::Display,
-    ops::{BitAnd, BitOr},
-    str::FromStr,
-};
+use std::{fmt::Display, str::FromStr};
+
+pub mod index_set;
+pub use index_set::IndexSet;
 
 /// Trait for resolving variable names in expressions.
 /// Implementors define variable aliases and the indexed-variable naming scheme.
-///
-/// Maximum `ndim` is 128 (limited by `u128` bitmask in `DepMask`).
 pub trait VarMap {
-    /// Number of dimensions (max 128, limited by `DepMask` bitmask).
+    /// Number of dimensions.
     fn ndim(&self) -> usize;
 
     /// Resolve a variable alias (e.g. "x", "y", "z") to a dimension index.
     fn resolve_alias(&self, name: &str) -> Option<usize>;
 
-    /// Primary variable prefix used for indexed variables (e.g. "x0", "x1", …).
+    /// Primary variable prefix used for indexed variables (e.g. "x0", "x1", ..).
     fn primary_prefix(&self) -> &str;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DepMask(u128);
-
-impl From<u128> for DepMask {
-    fn from(value: u128) -> Self {
-        DepMask(value)
-    }
-}
-
-impl BitOr for DepMask {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Self::Output::from(self.0 | rhs.0)
-    }
-}
-
-impl BitAnd for DepMask {
-    type Output = Self;
-    fn bitand(self, rhs: Self) -> Self::Output {
-        Self::Output::from(self.0 & rhs.0)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,7 +32,7 @@ pub enum Node {
     /// let slot_i = expr in body
     Let(usize, Box<Node>, Box<Node>),
     /// reference to cached CSE slot
-    CseRef(usize, DepMask),
+    CseRef(usize, IndexSet),
 }
 
 pub type CompiledExpr = Box<dyn Fn(&[f64], &mut [f64]) -> f64 + Send + Sync>;
@@ -563,11 +537,36 @@ impl Node {
         self.compile_multi(spatial_dims)
     }
 
+    fn collect_unbound_cse_refs(&self) -> IndexSet {
+        match self {
+            Node::CseRef(slot, _) => IndexSet::singleton(*slot),
+            Node::Let(slot, expr, body) => {
+                let mut set = expr.collect_unbound_cse_refs() | body.collect_unbound_cse_refs();
+                set.insert(*slot, false);
+                set
+            }
+            Node::Num(_) | Node::Var(_) => IndexSet::default(),
+            Node::Neg(a) | Node::F1(_, a) => a.collect_unbound_cse_refs(),
+            Node::Add(a, b)
+            | Node::Sub(a, b)
+            | Node::Mul(a, b)
+            | Node::Div(a, b)
+            | Node::Pow(a, b)
+            | Node::Mod(a, b)
+            | Node::F2(_, a, b) => a.collect_unbound_cse_refs() | b.collect_unbound_cse_refs(),
+        }
+    }
+
     /// Single-pass: find one repeated subtree, extract into Let.
     fn cse_one_pass(&mut self, slot: usize) -> bool {
         let pattern = {
             let mut nodes: Vec<&Node> = Vec::new();
             Self::cse_collect_non_trivial(self, &mut nodes);
+            nodes = nodes
+                .iter()
+                .copied()
+                .filter(|n| n.collect_unbound_cse_refs().is_empty())
+                .collect();
 
             let mut found = None::<Node>;
             'outer: for i in 0..nodes.len() {
@@ -648,10 +647,10 @@ impl Node {
         }
     }
 
-    pub fn depends_on(&self) -> DepMask {
+    pub fn depends_on(&self) -> IndexSet {
         match self {
-            Node::Num(_) => 0.into(),
-            Node::Var(i) => (1 << *i).into(),
+            Node::Num(_) => IndexSet::default(),
+            Node::Var(i) => IndexSet::singleton(*i),
             Node::Neg(a) | Node::F1(_, a) => a.depends_on(),
             Node::Add(a, b)
             | Node::Sub(a, b)
@@ -661,7 +660,7 @@ impl Node {
             | Node::Mod(a, b)
             | Node::F2(_, a, b) => a.depends_on() | b.depends_on(),
             Node::Let(_, expr, body) => expr.depends_on() | body.depends_on(),
-            Node::CseRef(_, deps) => *deps,
+            Node::CseRef(_, deps) => deps.clone(),
         }
     }
 
@@ -789,7 +788,7 @@ impl Node {
 
     pub fn compile_invariants_combined(
         &mut self,
-        invariant_mask: DepMask,
+        invariant_mask: &IndexSet,
         slot: &mut usize,
     ) -> Option<CompiledExpr> {
         let mut pieces: Vec<(usize, Node)> = Vec::new();
@@ -810,12 +809,12 @@ impl Node {
 
     fn collect_invariants(
         &mut self,
-        invariant_mask: DepMask,
+        invariant_mask: &IndexSet,
         slot: &mut usize,
         pieces: &mut Vec<(usize, Node)>,
     ) {
         let deps = self.depends_on();
-        if deps & invariant_mask == 0.into()
+        if deps.is_disjoint(invariant_mask)
             && !matches!(self, Node::Num(_) | Node::Var(_) | Node::CseRef(_, _))
         {
             let node = std::mem::replace(self, Node::CseRef(*slot, deps));
@@ -839,7 +838,7 @@ impl Node {
                     expr.collect_invariants(invariant_mask, slot, pieces);
 
                     let alias = if let Node::CseRef(rs, deps) = expr.as_ref()
-                        && *deps & invariant_mask == 0.into()
+                        && deps.is_disjoint(invariant_mask)
                         && *rs != *ls
                     {
                         Some((*ls, *rs))
@@ -919,37 +918,38 @@ impl Node {
     }
 
     pub fn compile_multi(&mut self, spatial_dims: &[usize]) -> CompiledExprMulti {
-        let masks: Vec<DepMask> = {
+        let masks: Vec<IndexSet> = {
             let n = spatial_dims.len();
             let total = 1u8 << n;
-            let mut masks_by_popcount: Vec<Vec<DepMask>> = vec![Vec::new(); n + 1];
+            let mut masks_by_popcount: Vec<Vec<IndexSet>> = vec![Vec::new(); n + 1];
 
             for bits in 1..(total - 1) {
-                let msk = (0..n)
-                    .filter(|&i| (bits >> i) & 1 == 1)
-                    .map(|i| 1u128 << spatial_dims[i])
-                    .sum::<u128>()
-                    .into();
+                let mut msk = IndexSet::default();
+                for (i, &dim) in spatial_dims[..n].iter().enumerate() {
+                    if (bits >> i) & 1 == 1 {
+                        msk.insert(dim, true);
+                    }
+                }
                 masks_by_popcount[bits.count_ones() as usize].push(msk);
             }
 
             masks_by_popcount.into_iter().rev().flatten().collect()
         };
 
-        let inner_bit: DepMask = (1u128 << spatial_dims[0]).into();
+        let inner_bit = IndexSet::singleton(spatial_dims[0]);
 
         let mut slot = self.cse_slots();
         let mut groups = Vec::with_capacity(masks.len());
 
         for mask in masks {
             // Skip masks without x (innermost) — nothing to hoist to
-            if mask & inner_bit == 0.into() {
+            if mask.is_disjoint(&inner_bit) {
                 continue;
             }
-            if let Some(combined) = self.compile_invariants_combined(mask, &mut slot) {
+            if let Some(combined) = self.compile_invariants_combined(&mask, &mut slot) {
                 let level = spatial_dims
                     .iter()
-                    .take_while(|&&d| (mask & DepMask::from(1u128 << d)) != 0.into())
+                    .take_while(|&&d| mask.contains(d))
                     .count() as u8;
                 groups.push(InvariantGroup { level, combined });
             }
@@ -1809,13 +1809,13 @@ mod tests {
                 1usize,
                 Node::Mul(Box::new(Node::Var(2)), Box::new(Node::Var(2))),
             ),
-            (0usize, Node::CseRef(1, DepMask::from(0))),
+            (0usize, Node::CseRef(1, IndexSet::singleton(2))),
             (
                 2usize,
                 Node::F1(
                     F1::Ln,
                     Box::new(Node::Add(
-                        Box::new(Node::CseRef(0, DepMask::from(4))),
+                        Box::new(Node::CseRef(1, IndexSet::singleton(2))),
                         Box::new(Node::Num(1.0)),
                     )),
                 ),
