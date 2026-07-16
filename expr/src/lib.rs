@@ -1853,6 +1853,32 @@ mod tests {
                 "exp(sin(x) * cos(y)) + ln(z*z + 1) + atan2(sqrt(x*x + y*y + z*z), 1) + sqrt(abs(x + y))",
             ),
             ("repeated", "(x*x + y*y)*(x*x + y*y) + sin(x*x + y*y)"),
+            (
+                "very_heavy",
+                concat!(
+                    "exp(-sqrt(x*x + y*y + z*z) / (1 + sqrt(x*x + y*y + z*z)))",
+                    " * sin(sqrt(x*x + y*y + z*z) + cos(sqrt(x*x + y*y + z*z))",
+                    " * tanh(sqrt(x*x + y*y + z*z) / (1 + sqrt(x*x + y*y + z*z)))) + ",
+                    "ln(1 + abs(sin(x)*cos(y) + sin(y)*cos(z) + sin(z)*cos(x)",
+                    " + sin(x)*sin(y)*sin(z)))",
+                    " * atan2(sqrt(1 + x*x + y*y + z*z",
+                    " + sin(x*x + y*y + z*z)*cos(x*x + y*y + z*z)),",
+                    " 1 + abs(sin(x)^2 + cos(y)^2 + tanh(z)^2",
+                    " + sin(x)*sin(z) + cos(y)*cos(z))) + ",
+                    "tanh(sin(x*x + y*y)*cos(y*y + z*z)*sin(z*z + x*x)",
+                    " + cos(x*x + y*y)*sin(y*y + z*z)*cos(z*z + x*x))",
+                    " / (1 + abs(cos(x*x + y*y + z*z)",
+                    " + sin(x*x + y*y + z*z)^2)) + ",
+                    "cbrt(1 + abs(sin(x*x + y*y + z*z)*cos(x*x + y*y + z*z)",
+                    " - tanh((x*x + y*y + z*z) / (1 + x*x + y*y + z*z))))",
+                    " * atan(sqrt(1 + x*x + y*y + z*z)",
+                    " / (1 + sqrt(x*x + y*y + z*z))) + ",
+                    "(sin(x)^3 + cos(y)^3 + tanh(z)^3",
+                    " + sin(x)*cos(y)*tanh(z))",
+                    " / (1 + abs(sin(x)*cos(y)*tanh(z)))",
+                    " * sqrt(1 + sin(x)^2 + cos(y)^2 + tanh(z)^2)",
+                ),
+            ),
         ];
         let side = 32;
         let scale = 10.0 / side as f64;

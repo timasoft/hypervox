@@ -52,6 +52,41 @@ fn direct_repeated(x: f64, y: f64, _z: f64) -> f64 {
     (x * x + y * y) * (x * x + y * y) + (x * x + y * y).sin()
 }
 
+#[inline(never)]
+fn direct_very_heavy(x: f64, y: f64, z: f64) -> f64 {
+    let r2 = x * x + y * y + z * z;
+    let sqrt_r2 = r2.sqrt();
+    (-sqrt_r2 / (1.0 + sqrt_r2)).exp()
+        * (sqrt_r2 + sqrt_r2.cos() * (sqrt_r2 / (1.0 + sqrt_r2)).tanh()).sin()
+        + (1.0
+            + (x.sin() * y.cos()
+                + y.sin() * z.cos()
+                + z.sin() * x.cos()
+                + x.sin() * y.sin() * z.sin())
+            .abs())
+        .ln()
+            * ((1.0 + r2 + r2.sin() * r2.cos()).sqrt()).atan2(
+                1.0 + (x.sin() * x.sin()
+                    + y.cos() * y.cos()
+                    + z.tanh() * z.tanh()
+                    + x.sin() * z.sin()
+                    + y.cos() * z.cos())
+                .abs(),
+            )
+        + ((x * x + y * y).sin() * (y * y + z * z).cos() * (z * z + x * x).sin()
+            + (x * x + y * y).cos() * (y * y + z * z).sin() * (z * z + x * x).cos())
+        .tanh()
+            / (1.0 + (r2.cos() + r2.sin() * r2.sin()).abs())
+        + (1.0 + (r2.sin() * r2.cos() - (r2 / (1.0 + r2)).tanh()).abs()).cbrt()
+            * ((1.0 + r2).sqrt() / (1.0 + sqrt_r2)).atan()
+        + (x.sin() * x.sin() * x.sin()
+            + y.cos() * y.cos() * y.cos()
+            + z.tanh() * z.tanh() * z.tanh()
+            + x.sin() * y.cos() * z.tanh())
+            / (1.0 + (x.sin() * y.cos() * z.tanh()).abs())
+            * (1.0 + x.sin() * x.sin() + y.cos() * y.cos() + z.tanh() * z.tanh()).sqrt()
+}
+
 struct Case {
     name: &'static str,
     hx: &'static str,
@@ -83,6 +118,69 @@ const CASES: &[Case] = &[
         hx: "(x*x + y*y)*(x*x + y*y) + sin(x*x + y*y)",
         ee: "(x*x + y*y)*(x*x + y*y) + math::sin(x*x + y*y)",
         direct: direct_repeated,
+    },
+    Case {
+        name: "very_heavy",
+        hx: concat!(
+            "exp(-sqrt(x*x + y*y + z*z) / (1 + sqrt(x*x + y*y + z*z)))",
+            " * sin(sqrt(x*x + y*y + z*z) + cos(sqrt(x*x + y*y + z*z))",
+            " * tanh(sqrt(x*x + y*y + z*z) / (1 + sqrt(x*x + y*y + z*z)))) + ",
+            "ln(1 + abs(sin(x)*cos(y) + sin(y)*cos(z) + sin(z)*cos(x)",
+            " + sin(x)*sin(y)*sin(z)))",
+            " * atan2(sqrt(1 + x*x + y*y + z*z",
+            " + sin(x*x + y*y + z*z)*cos(x*x + y*y + z*z)),",
+            " 1 + abs(sin(x)^2 + cos(y)^2 + tanh(z)^2",
+            " + sin(x)*sin(z) + cos(y)*cos(z))) + ",
+            "tanh(sin(x*x + y*y)*cos(y*y + z*z)*sin(z*z + x*x)",
+            " + cos(x*x + y*y)*sin(y*y + z*z)*cos(z*z + x*x))",
+            " / (1 + abs(cos(x*x + y*y + z*z)",
+            " + sin(x*x + y*y + z*z)^2)) + ",
+            "cbrt(1 + abs(sin(x*x + y*y + z*z)*cos(x*x + y*y + z*z)",
+            " - tanh((x*x + y*y + z*z) / (1 + x*x + y*y + z*z))))",
+            " * atan(sqrt(1 + x*x + y*y + z*z)",
+            " / (1 + sqrt(x*x + y*y + z*z))) + ",
+            "(sin(x)^3 + cos(y)^3 + tanh(z)^3",
+            " + sin(x)*cos(y)*tanh(z))",
+            " / (1 + abs(sin(x)*cos(y)*tanh(z)))",
+            " * sqrt(1 + sin(x)^2 + cos(y)^2 + tanh(z)^2)",
+        ),
+        ee: concat!(
+            "math::exp(-math::sqrt(x*x + y*y + z*z)",
+            " / (1 + math::sqrt(x*x + y*y + z*z)))",
+            " * math::sin(math::sqrt(x*x + y*y + z*z)",
+            " + math::cos(math::sqrt(x*x + y*y + z*z))",
+            " * math::tanh(math::sqrt(x*x + y*y + z*z)",
+            " / (1 + math::sqrt(x*x + y*y + z*z)))) + ",
+            "math::ln(1 + math::abs(math::sin(x)*math::cos(y)",
+            " + math::sin(y)*math::cos(z)",
+            " + math::sin(z)*math::cos(x)",
+            " + math::sin(x)*math::sin(y)*math::sin(z)))",
+            " * math::atan2(math::sqrt(1 + x*x + y*y + z*z",
+            " + math::sin(x*x + y*y + z*z)",
+            " * math::cos(x*x + y*y + z*z)),",
+            " 1 + math::abs(math::sin(x)^2 + math::cos(y)^2",
+            " + math::tanh(z)^2 + math::sin(x)*math::sin(z)",
+            " + math::cos(y)*math::cos(z))) + ",
+            "math::tanh(math::sin(x*x + y*y)*math::cos(y*y + z*z)",
+            " * math::sin(z*z + x*x)",
+            " + math::cos(x*x + y*y)*math::sin(y*y + z*z)",
+            " * math::cos(z*z + x*x))",
+            " / (1 + math::abs(math::cos(x*x + y*y + z*z)",
+            " + math::sin(x*x + y*y + z*z)^2)) + ",
+            "math::cbrt(1 + math::abs(math::sin(x*x + y*y + z*z)",
+            " * math::cos(x*x + y*y + z*z)",
+            " - math::tanh((x*x + y*y + z*z)",
+            " / (1 + x*x + y*y + z*z))))",
+            " * math::atan(math::sqrt(1 + x*x + y*y + z*z)",
+            " / (1 + math::sqrt(x*x + y*y + z*z))) + ",
+            "(math::sin(x)^3 + math::cos(y)^3 + math::tanh(z)^3",
+            " + math::sin(x)*math::cos(y)*math::tanh(z))",
+            " / (1 + math::abs(math::sin(x)*math::cos(y)",
+            " * math::tanh(z)))",
+            " * math::sqrt(1 + math::sin(x)^2 + math::cos(y)^2",
+            " + math::tanh(z)^2)",
+        ),
+        direct: direct_very_heavy,
     },
 ];
 
