@@ -537,36 +537,11 @@ impl Node {
         self.compile_multi(spatial_dims)
     }
 
-    fn collect_unbound_cse_refs(&self) -> IndexSet {
-        match self {
-            Node::CseRef(slot, _) => IndexSet::singleton(*slot),
-            Node::Let(slot, expr, body) => {
-                let mut set = expr.collect_unbound_cse_refs() | body.collect_unbound_cse_refs();
-                set.insert(*slot, false);
-                set
-            }
-            Node::Num(_) | Node::Var(_) => IndexSet::default(),
-            Node::Neg(a) | Node::F1(_, a) => a.collect_unbound_cse_refs(),
-            Node::Add(a, b)
-            | Node::Sub(a, b)
-            | Node::Mul(a, b)
-            | Node::Div(a, b)
-            | Node::Pow(a, b)
-            | Node::Mod(a, b)
-            | Node::F2(_, a, b) => a.collect_unbound_cse_refs() | b.collect_unbound_cse_refs(),
-        }
-    }
-
     /// Single-pass: find one repeated subtree, extract into Let.
     fn cse_one_pass(&mut self, slot: usize) -> bool {
         let pattern = {
             let mut nodes: Vec<&Node> = Vec::new();
-            Self::cse_collect_non_trivial(self, &mut nodes);
-            nodes = nodes
-                .iter()
-                .copied()
-                .filter(|n| n.collect_unbound_cse_refs().is_empty())
-                .collect();
+            Self::cse_collect_extractable_candidates(self, &mut nodes);
 
             let mut found = None::<Node>;
             'outer: for i in 0..nodes.len() {
@@ -592,16 +567,26 @@ impl Node {
         }
     }
 
-    fn cse_collect_non_trivial<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+    /// Collects AST nodes that can be safely extracted into a CSE `Let` binding.
+    ///
+    /// Returns an `IndexSet` of unbound `CseRef` slots this node depends on.
+    fn cse_collect_extractable_candidates<'a>(node: &'a Node, out: &mut Vec<&'a Node>) -> IndexSet {
         match node {
-            Node::Num(_) | Node::Var(_) | Node::CseRef(_, _) => {}
-            Node::Let(_, expr, body) => {
-                Self::cse_collect_non_trivial(expr, out);
-                Self::cse_collect_non_trivial(body, out);
+            Node::CseRef(slot, _) => IndexSet::singleton(*slot),
+            Node::Let(slot, expr, body) => {
+                let sa = Self::cse_collect_extractable_candidates(expr, out);
+                let sb = Self::cse_collect_extractable_candidates(body, out);
+                let mut s = sa | sb;
+                s.insert(*slot, false);
+                s
             }
-            Node::Neg(a) => {
-                out.push(node);
-                Self::cse_collect_non_trivial(a, out);
+            Node::Num(_) | Node::Var(_) => IndexSet::default(),
+            Node::Neg(a) | Node::F1(_, a) => {
+                let s = Self::cse_collect_extractable_candidates(a, out);
+                if s.is_empty() {
+                    out.push(node);
+                }
+                s
             }
             Node::Add(a, b)
             | Node::Sub(a, b)
@@ -610,13 +595,13 @@ impl Node {
             | Node::Pow(a, b)
             | Node::Mod(a, b)
             | Node::F2(_, a, b) => {
-                out.push(node);
-                Self::cse_collect_non_trivial(a, out);
-                Self::cse_collect_non_trivial(b, out);
-            }
-            Node::F1(_, a) => {
-                out.push(node);
-                Self::cse_collect_non_trivial(a, out);
+                let sa = Self::cse_collect_extractable_candidates(a, out);
+                let sb = Self::cse_collect_extractable_candidates(b, out);
+                let s = sa | sb;
+                if s.is_empty() {
+                    out.push(node);
+                }
+                s
             }
         }
     }
