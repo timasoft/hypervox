@@ -110,7 +110,7 @@ pub fn generate_voxel_grid(
         ));
     }
 
-    let expr = hypervox_expr::parse(expr_str, dim)?;
+    let expr = hypervox_expr::parse(expr_str, dim).map_err(|e| e.to_string())?;
 
     let node_dim = size + 1;
     let node_dim_sq = node_dim * node_dim;

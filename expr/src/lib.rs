@@ -1,7 +1,107 @@
-use std::{fmt::Display, str::FromStr};
+use std::{
+    fmt::{self, Display},
+    str::FromStr,
+};
 
 pub mod index_set;
 pub use index_set::IndexSet;
+
+/// Structured error type for expression parsing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Error {
+    Lexer { col: usize, kind: LexerErrorKind },
+    Parser { col: usize, kind: ParseErrorKind },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LexerErrorKind {
+    UnexpectedChar(char),
+    InvalidNumber(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParseErrorKind {
+    EmptyExpression,
+    TrailingToken(Token),
+    ExpectedRParen(Token),
+    ExpectedPipe(Token),
+    UnexpectedToken(Token),
+    FunctionArgCount {
+        name: String,
+        expected: usize,
+        found: usize,
+    },
+    ExpectedRParenOrComma(Token),
+    VarOutOfRange {
+        name: String,
+        max: usize,
+    },
+    UnknownIdentifier(String),
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Lexer { col, kind } => write!(f, "at column {col}: {kind}"),
+            Error::Parser { col, kind } => write!(f, "at column {col}: {kind}"),
+        }
+    }
+}
+
+impl Display for LexerErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LexerErrorKind::UnexpectedChar(c) => write!(f, "unexpected character '{c}'"),
+            LexerErrorKind::InvalidNumber(s) => write!(f, "invalid number '{s}'"),
+        }
+    }
+}
+
+impl Display for ParseErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseErrorKind::EmptyExpression => write!(f, "expression cannot be empty"),
+            ParseErrorKind::TrailingToken(tok) => {
+                write!(f, "unexpected token {tok} after expression")
+            }
+            ParseErrorKind::ExpectedRParen(tok) => {
+                write!(f, "expected ')' but found {tok}")
+            }
+            ParseErrorKind::ExpectedPipe(tok) => {
+                write!(f, "expected '|' but found {tok}")
+            }
+            ParseErrorKind::UnexpectedToken(tok) => {
+                write!(f, "unexpected token {tok}")
+            }
+            ParseErrorKind::FunctionArgCount {
+                name,
+                expected,
+                found,
+            } => {
+                let s = if *expected == 1 {
+                    "argument"
+                } else {
+                    "arguments"
+                };
+                write!(
+                    f,
+                    "function '{name}' requires {expected} {s}, but found {found}"
+                )
+            }
+            ParseErrorKind::ExpectedRParenOrComma(tok) => {
+                write!(f, "expected ')' or ',' but found {tok}")
+            }
+            ParseErrorKind::VarOutOfRange { name, max } => {
+                write!(f, "variable '{name}' out of range: max index is {max}")
+            }
+            ParseErrorKind::UnknownIdentifier(name) => {
+                write!(f, "unknown identifier '{name}'")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 /// Trait for resolving variable names in expressions.
 /// Implementors define variable aliases and the indexed-variable naming scheme.
@@ -955,8 +1055,9 @@ impl Node {
     }
 }
 
+/// Token produced by the lexer and consumed by the Pratt parser.
 #[derive(Debug, Clone, PartialEq)]
-enum Token {
+pub enum Token {
     Num(f64),
     Ident(String),
     Plus,
@@ -1017,7 +1118,7 @@ impl Lexer {
         c
     }
 
-    fn next_token(&mut self) -> Result<Token, String> {
+    fn next_token(&mut self) -> Result<Token, Error> {
         // skip whitespace
         while let Some(c) = self.peek() {
             if c.is_ascii_whitespace() {
@@ -1082,14 +1183,14 @@ impl Lexer {
             }
             c if c.is_ascii_digit() || c == '.' => self.read_number(),
             c if c.is_ascii_alphabetic() => self.read_ident(),
-            c => Err(format!(
-                "at column {}: unexpected character '{c}'",
-                self.token_start + 1
-            )),
+            c => Err(Error::Lexer {
+                col: self.token_start + 1,
+                kind: LexerErrorKind::UnexpectedChar(c),
+            }),
         }
     }
 
-    fn read_number(&mut self) -> Result<Token, String> {
+    fn read_number(&mut self) -> Result<Token, Error> {
         let start = self.pos;
 
         while let Some(c) = self.peek() {
@@ -1128,12 +1229,13 @@ impl Lexer {
         }
 
         let s: String = self.chars[start..self.pos].iter().collect();
-        s.parse::<f64>()
-            .map(Token::Num)
-            .map_err(|_| format!("at column {}: invalid number '{s}'", self.token_start + 1))
+        s.parse::<f64>().map(Token::Num).map_err(|_| Error::Lexer {
+            col: self.token_start + 1,
+            kind: LexerErrorKind::InvalidNumber(s),
+        })
     }
 
-    fn read_ident(&mut self) -> Result<Token, String> {
+    fn read_ident(&mut self) -> Result<Token, Error> {
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() {
@@ -1155,7 +1257,7 @@ struct Parser<'a, V: VarMap> {
 }
 
 impl<'a, V: VarMap> Parser<'a, V> {
-    fn new(input: &str, vars: &'a V) -> Result<Self, String> {
+    fn new(input: &str, vars: &'a V) -> Result<Self, Error> {
         let mut lexer = Lexer::new(input);
         let current = lexer.next_token()?;
         let current_pos = lexer.token_start;
@@ -1167,31 +1269,34 @@ impl<'a, V: VarMap> Parser<'a, V> {
         })
     }
 
-    fn advance(&mut self) -> Result<(), String> {
+    fn advance(&mut self) -> Result<(), Error> {
         self.current = self.lexer.next_token()?;
         self.current_pos = self.lexer.token_start;
         Ok(())
     }
 
-    fn err_at(&self, msg: impl Display) -> String {
-        format!("at column {}: {msg}", self.current_pos + 1)
+    fn err_at(&self, kind: ParseErrorKind) -> Error {
+        Error::Parser {
+            col: self.current_pos + 1,
+            kind,
+        }
     }
 
-    fn parse(mut self) -> Result<Node, String> {
+    fn parse(mut self) -> Result<Node, Error> {
         if matches!(self.current, Token::Eof) {
-            return Err("expression cannot be empty".into());
+            return Err(Error::Parser {
+                col: 0,
+                kind: ParseErrorKind::EmptyExpression,
+            });
         }
         let node = self.parse_expr()?;
         if !matches!(self.current, Token::Eof) {
-            return Err(self.err_at(format!(
-                "unexpected token {} after expression",
-                self.current
-            )));
+            return Err(self.err_at(ParseErrorKind::TrailingToken(self.current.clone())));
         }
         Ok(node)
     }
 
-    fn parse_expr(&mut self) -> Result<Node, String> {
+    fn parse_expr(&mut self) -> Result<Node, Error> {
         let mut left = self.parse_term()?;
         while matches!(self.current, Token::Plus | Token::Minus) {
             let op = std::mem::replace(&mut self.current, Token::Eof);
@@ -1206,7 +1311,7 @@ impl<'a, V: VarMap> Parser<'a, V> {
         Ok(left)
     }
 
-    fn parse_term(&mut self) -> Result<Node, String> {
+    fn parse_term(&mut self) -> Result<Node, Error> {
         let mut left = self.parse_unary()?;
         while matches!(self.current, Token::Star | Token::Slash | Token::Percent) {
             let op = std::mem::replace(&mut self.current, Token::Eof);
@@ -1222,7 +1327,7 @@ impl<'a, V: VarMap> Parser<'a, V> {
         Ok(left)
     }
 
-    fn parse_unary(&mut self) -> Result<Node, String> {
+    fn parse_unary(&mut self) -> Result<Node, Error> {
         if matches!(self.current, Token::Minus) {
             self.advance()?;
             let node = self.parse_unary()?;
@@ -1236,7 +1341,7 @@ impl<'a, V: VarMap> Parser<'a, V> {
     }
 
     /// right-associative: a^b^c = a^(b^c)
-    fn parse_power(&mut self) -> Result<Node, String> {
+    fn parse_power(&mut self) -> Result<Node, Error> {
         let left = self.parse_primary()?;
         if matches!(self.current, Token::Caret) {
             self.advance()?;
@@ -1247,7 +1352,7 @@ impl<'a, V: VarMap> Parser<'a, V> {
         }
     }
 
-    fn parse_primary(&mut self) -> Result<Node, String> {
+    fn parse_primary(&mut self) -> Result<Node, Error> {
         match &self.current {
             Token::Num(v) => {
                 let val = *v;
@@ -1267,7 +1372,7 @@ impl<'a, V: VarMap> Parser<'a, V> {
                 self.advance()?;
                 let node = self.parse_expr()?;
                 if !matches!(self.current, Token::RParen) {
-                    return Err(self.err_at(format!("expected ')' but found {}", self.current)));
+                    return Err(self.err_at(ParseErrorKind::ExpectedRParen(self.current.clone())));
                 }
                 self.advance()?;
                 Ok(node)
@@ -1276,16 +1381,16 @@ impl<'a, V: VarMap> Parser<'a, V> {
                 self.advance()?;
                 let node = self.parse_expr()?;
                 if !matches!(self.current, Token::Pipe) {
-                    return Err(self.err_at(format!("expected '|' but found {}", self.current)));
+                    return Err(self.err_at(ParseErrorKind::ExpectedPipe(self.current.clone())));
                 }
                 self.advance()?;
                 Ok(Node::F1(F1::Abs, Box::new(node)))
             }
-            _ => Err(self.err_at(format!("unexpected token {}", self.current))),
+            _ => Err(self.err_at(ParseErrorKind::UnexpectedToken(self.current.clone()))),
         }
     }
 
-    fn parse_function_call(&mut self, name: &str) -> Result<Node, String> {
+    fn parse_function_call(&mut self, name: &str) -> Result<Node, Error> {
         debug_assert!(matches!(self.current, Token::LParen));
         self.advance()?;
 
@@ -1293,13 +1398,24 @@ impl<'a, V: VarMap> Parser<'a, V> {
             self.advance()?;
             return match F0::from_str(name) {
                 Ok(f) => Ok(Node::Num(f.to_num())),
-                Err(e) => Err(self.err_at(if F1::from_str(name).is_ok() {
-                    format!("function '{name}' requires 1 argument")
-                } else if F2::from_str(name).is_ok() {
-                    format!("function '{name}' requires 2 arguments")
-                } else {
-                    e
-                })),
+                Err(_) => {
+                    let kind = if F1::from_str(name).is_ok() {
+                        ParseErrorKind::FunctionArgCount {
+                            name: name.to_string(),
+                            expected: 1,
+                            found: 0,
+                        }
+                    } else if F2::from_str(name).is_ok() {
+                        ParseErrorKind::FunctionArgCount {
+                            name: name.to_string(),
+                            expected: 2,
+                            found: 0,
+                        }
+                    } else {
+                        ParseErrorKind::UnknownIdentifier(name.to_string())
+                    };
+                    Err(self.err_at(kind))
+                }
             };
         }
 
@@ -1309,46 +1425,68 @@ impl<'a, V: VarMap> Parser<'a, V> {
             self.advance()?;
             let arg2 = self.parse_expr()?;
             if !matches!(self.current, Token::RParen) {
-                return Err(self.err_at(format!("expected ')' but found {}", self.current)));
+                return Err(self.err_at(ParseErrorKind::ExpectedRParen(self.current.clone())));
             }
             self.advance()?;
 
             match F2::from_str(name) {
                 Ok(f) => Ok(Node::F2(f, Box::new(arg1), Box::new(arg2))),
-                Err(e) => Err(self.err_at(if F1::from_str(name).is_ok() {
-                    format!("function '{name}' requires 1 argument")
-                } else if F0::from_str(name).is_ok() {
-                    format!("function '{name}' requires 0 arguments")
-                } else {
-                    e
-                })),
+                Err(_) => {
+                    let kind = if F1::from_str(name).is_ok() {
+                        ParseErrorKind::FunctionArgCount {
+                            name: name.to_string(),
+                            expected: 1,
+                            found: 2,
+                        }
+                    } else if F0::from_str(name).is_ok() {
+                        ParseErrorKind::FunctionArgCount {
+                            name: name.to_string(),
+                            expected: 0,
+                            found: 2,
+                        }
+                    } else {
+                        ParseErrorKind::UnknownIdentifier(name.to_string())
+                    };
+                    Err(self.err_at(kind))
+                }
             }
         } else {
             if !matches!(self.current, Token::RParen) {
-                return Err(self.err_at(format!("expected ')' or ',' but found {}", self.current)));
+                return Err(
+                    self.err_at(ParseErrorKind::ExpectedRParenOrComma(self.current.clone()))
+                );
             }
             self.advance()?;
 
             match F1::from_str(name) {
                 Ok(f) => Ok(Node::F1(f, Box::new(arg1))),
-                Err(e) => Err(self.err_at(if F0::from_str(name).is_ok() {
-                    format!("function '{name}' requires 0 arguments")
-                } else if F2::from_str(name).is_ok() {
-                    format!("function '{name}' requires 2 arguments")
-                } else {
-                    e
-                })),
+                Err(_) => {
+                    let kind = if F0::from_str(name).is_ok() {
+                        ParseErrorKind::FunctionArgCount {
+                            name: name.to_string(),
+                            expected: 0,
+                            found: 1,
+                        }
+                    } else if F2::from_str(name).is_ok() {
+                        ParseErrorKind::FunctionArgCount {
+                            name: name.to_string(),
+                            expected: 2,
+                            found: 1,
+                        }
+                    } else {
+                        ParseErrorKind::UnknownIdentifier(name.to_string())
+                    };
+                    Err(self.err_at(kind))
+                }
             }
         }
     }
 }
 
-fn resolve_ident<V: VarMap>(name: &str, col: usize, vars: &V) -> Result<Node, String> {
+fn resolve_ident<V: VarMap>(name: &str, col: usize, vars: &V) -> Result<Node, Error> {
     if let Ok(f) = F0::from_str(name) {
         return Ok(Node::Num(f.to_num()));
     };
-
-    let err_prefix = format!("at column {col}");
 
     if let Some(idx) = vars.resolve_alias(name) {
         return Ok(Node::Var(idx));
@@ -1362,26 +1500,34 @@ fn resolve_ident<V: VarMap>(name: &str, col: usize, vars: &V) -> Result<Node, St
         if idx < vars.ndim() {
             return Ok(Node::Var(idx));
         }
-        return Err(format!(
-            "{}: variable '{name}' out of range: max index is {}",
-            err_prefix,
-            vars.ndim() - 1
-        ));
+        return Err(Error::Parser {
+            col,
+            kind: ParseErrorKind::VarOutOfRange {
+                name: name.to_string(),
+                max: vars.ndim().saturating_sub(1),
+            },
+        });
     }
 
-    Err(format!("{}: unknown identifier '{name}'", err_prefix))
+    Err(Error::Parser {
+        col,
+        kind: ParseErrorKind::UnknownIdentifier(name.to_string()),
+    })
 }
 
 /// Parse an expression string into a `Node` AST.
-pub fn parse<V: VarMap>(expr_str: &str, vars: &V) -> Result<Node, String> {
+pub fn parse<V: VarMap>(expr_str: &str, vars: &V) -> Result<Node, Error> {
     let parser = Parser::new(expr_str, vars)?;
     parser.parse()
 }
 
-pub fn validate(expr_str: &str, vars: &impl VarMap) -> Result<(), String> {
+pub fn validate(expr_str: &str, vars: &impl VarMap) -> Result<(), Error> {
     let trimmed = expr_str.trim();
     if trimmed.is_empty() {
-        return Err("Expression cannot be empty".into());
+        return Err(Error::Parser {
+            col: 0,
+            kind: ParseErrorKind::EmptyExpression,
+        });
     }
     parse(trimmed, vars).map(|_| ())
 }
@@ -2103,5 +2249,18 @@ mod tests {
         assert_eq!(e("x3", &[0.0, 0.0, 0.0, 5.0]), 5.0);
         assert!(parse("x4", &dim).is_err());
         assert!(parse("xabc", &dim).is_err());
+    }
+
+    #[test]
+    fn test_error_structure() {
+        let dim = D3;
+        let err = parse("(x + y", &dim).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Parser {
+                col: _,
+                kind: ParseErrorKind::ExpectedRParen(_)
+            }
+        ));
     }
 }
