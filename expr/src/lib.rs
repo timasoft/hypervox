@@ -903,34 +903,37 @@ impl Node {
     }
 
     pub fn compile_multi(&mut self, spatial_dims: &[usize]) -> CompiledExprMulti {
+        if spatial_dims.is_empty() {
+            let main = self.compile();
+            let cse_slots = self.cse_slots();
+            return CompiledExprMulti {
+                groups: Vec::new(),
+                main,
+                cse_slots,
+            };
+        }
         let masks: Vec<IndexSet> = {
-            let n = spatial_dims.len();
+            let rest = &spatial_dims[1..];
+            let n = rest.len();
             let total = 1u8 << n;
-            let mut masks_by_popcount: Vec<Vec<IndexSet>> = vec![Vec::new(); n + 1];
-
-            for bits in 1..(total - 1) {
-                let mut msk = IndexSet::default();
-                for (i, &dim) in spatial_dims[..n].iter().enumerate() {
+            let mut masks_by_popcount: Vec<Vec<IndexSet>> = vec![Vec::new(); n + 2];
+            // generate only masks containing spatial_dims[0], skipping full set
+            for bits in 0..(total - 1) {
+                let mut msk = IndexSet::singleton(spatial_dims[0]);
+                for (i, &dim) in rest.iter().enumerate() {
                     if (bits >> i) & 1 == 1 {
                         msk.insert(dim, true);
                     }
                 }
-                masks_by_popcount[bits.count_ones() as usize].push(msk);
+                masks_by_popcount[msk.count_ones()].push(msk);
             }
-
             masks_by_popcount.into_iter().rev().flatten().collect()
         };
-
-        let inner_bit = IndexSet::singleton(spatial_dims[0]);
 
         let mut slot = self.cse_slots();
         let mut groups = Vec::with_capacity(masks.len());
 
         for mask in masks {
-            // Skip masks without x (innermost) — nothing to hoist to
-            if mask.is_disjoint(&inner_bit) {
-                continue;
-            }
             if let Some(combined) = self.compile_invariants_combined(&mask, &mut slot) {
                 let level = spatial_dims
                     .iter()
