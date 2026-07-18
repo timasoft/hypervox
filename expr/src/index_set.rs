@@ -1,6 +1,6 @@
 use std::{
     hash::{Hash, Hasher},
-    ops::{BitAnd, BitOr},
+    ops::{BitAnd, BitOr, Shl, Shr},
 };
 
 /// A compact bitset for tracking slot indices in CSE.
@@ -459,6 +459,134 @@ impl BitAnd for IndexSet {
     }
 }
 
+#[inline]
+fn heap_shl(vec: Vec<u64>, rhs: usize) -> IndexSet {
+    let chunk_shift = rhs / 64;
+    let bit_shift = rhs % 64;
+    let mut new_vec = Vec::with_capacity(chunk_shift + vec.len() + 1);
+    new_vec.extend(std::iter::repeat_n(0u64, chunk_shift));
+    if bit_shift == 0 {
+        new_vec.extend(vec);
+    } else {
+        let mut carry = 0u64;
+        for v in vec {
+            let val = (v << bit_shift) | carry;
+            carry = v >> (64 - bit_shift);
+            new_vec.push(val);
+        }
+        if carry != 0 {
+            new_vec.push(carry);
+        }
+    }
+    IndexSet::Heap(new_vec)
+}
+
+impl Shl<usize> for IndexSet {
+    type Output = Self;
+
+    fn shl(self, rhs: usize) -> Self {
+        if rhs == 0 || self.is_empty() {
+            return self;
+        }
+        match self {
+            IndexSet::Small(bits) => {
+                let val = bits as u128;
+                if (val.leading_zeros() as usize) < rhs {
+                    heap_shl(vec![bits as u64], rhs)
+                } else {
+                    let shifted = val << rhs;
+                    if shifted as u32 as u128 == shifted {
+                        IndexSet::Small(shifted as u32)
+                    } else if shifted as u64 as u128 == shifted {
+                        IndexSet::Medium(shifted as u64)
+                    } else {
+                        IndexSet::Large(shifted)
+                    }
+                }
+            }
+            IndexSet::Medium(bits) => {
+                let val = bits as u128;
+                if (val.leading_zeros() as usize) < rhs {
+                    heap_shl(vec![bits], rhs)
+                } else {
+                    let shifted = val << rhs;
+                    if shifted as u64 as u128 == shifted {
+                        IndexSet::Medium(shifted as u64)
+                    } else {
+                        IndexSet::Large(shifted)
+                    }
+                }
+            }
+            IndexSet::Large(bits) => {
+                if (bits.leading_zeros() as usize) < rhs {
+                    let lo = bits as u64;
+                    let hi = (bits >> 64) as u64;
+                    let vec = if hi != 0 { vec![lo, hi] } else { vec![lo] };
+                    heap_shl(vec, rhs)
+                } else {
+                    IndexSet::Large(bits << rhs)
+                }
+            }
+            IndexSet::Heap(vec) => heap_shl(vec, rhs),
+        }
+    }
+}
+
+impl Shr<usize> for IndexSet {
+    type Output = Self;
+
+    fn shr(self, rhs: usize) -> Self {
+        if rhs == 0 || self.is_empty() {
+            return self;
+        }
+        match self {
+            IndexSet::Small(bits) => {
+                if rhs >= 32 {
+                    IndexSet::Small(0)
+                } else {
+                    IndexSet::Small(bits >> rhs)
+                }
+            }
+            IndexSet::Medium(bits) => {
+                if rhs >= 64 {
+                    IndexSet::Small(0)
+                } else {
+                    IndexSet::Medium(bits >> rhs)
+                }
+            }
+            IndexSet::Large(bits) => {
+                if rhs >= 128 {
+                    IndexSet::Small(0)
+                } else {
+                    IndexSet::Large(bits >> rhs)
+                }
+            }
+            IndexSet::Heap(vec) => {
+                let chunk_shift = rhs / 64;
+                let bit_shift = rhs % 64;
+                if chunk_shift >= vec.len() {
+                    return IndexSet::Small(0);
+                }
+                let remaining = &vec[chunk_shift..];
+                if bit_shift == 0 {
+                    IndexSet::Heap(remaining.to_vec())
+                } else {
+                    let mut new_vec = Vec::with_capacity(remaining.len());
+                    for i in 0..remaining.len() {
+                        let mut val = remaining[i] >> bit_shift;
+                        if i + 1 < remaining.len() {
+                            val |= remaining[i + 1] << (64 - bit_shift);
+                        }
+                        new_vec.push(val);
+                    }
+                    IndexSet::Heap(new_vec)
+                }
+            }
+        }
+        .minimized()
+    }
+}
+
 /// An iterator over the slot indices contained in an [`IndexSet`].
 ///
 /// Produces indices in ascending order.
@@ -679,5 +807,67 @@ mod tests {
         let s: IndexSet = Default::default();
         assert!(s.is_empty());
         assert!(matches!(s, IndexSet::Small(0)));
+    }
+
+    #[test]
+    fn test_shl_small() {
+        let s = IndexSet::singleton(0) | IndexSet::singleton(2);
+        let shifted = s << 3;
+        assert!(shifted.contains(3));
+        assert!(shifted.contains(5));
+        assert!(!shifted.contains(0));
+    }
+
+    #[test]
+    fn test_shl_overflow_small() {
+        let s = IndexSet::singleton(0) | IndexSet::singleton(31);
+        let shifted = s << 1;
+        assert!(shifted.contains(1));
+        assert!(shifted.contains(32));
+    }
+
+    #[test]
+    fn test_shl_large_to_heap() {
+        let s = IndexSet::singleton(120);
+        let shifted = s << 10;
+        assert!(shifted.contains(130));
+    }
+
+    #[test]
+    fn test_shr_small() {
+        let s = IndexSet::singleton(5) | IndexSet::singleton(8);
+        let shifted = s >> 3;
+        assert!(shifted.contains(2));
+        assert!(shifted.contains(5));
+        assert!(!shifted.contains(0));
+    }
+
+    #[test]
+    fn test_shl_shr_empty() {
+        let s = IndexSet::Small(0);
+        assert!((s.clone() << 5).is_empty());
+        assert!((s >> 5).is_empty());
+    }
+
+    #[test]
+    fn test_shl_zero_shift() {
+        let s = IndexSet::singleton(0) | IndexSet::singleton(5) | IndexSet::singleton(100);
+        assert_eq!(s.clone() << 0, s);
+    }
+
+    #[test]
+    fn test_shr_overflow() {
+        let s = IndexSet::singleton(0)
+            | IndexSet::singleton(33)
+            | IndexSet::singleton(70)
+            | IndexSet::singleton(200);
+        assert!((s >> 300).is_empty());
+    }
+
+    #[test]
+    fn test_shl_shr_roundtrip() {
+        let s = IndexSet::singleton(0) | IndexSet::singleton(5) | IndexSet::singleton(100);
+        let shifted = s.clone() << 7 >> 7;
+        assert_eq!(shifted, s);
     }
 }
