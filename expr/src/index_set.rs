@@ -1,5 +1,6 @@
 use std::{
     hash::{Hash, Hasher},
+    iter::{ExactSizeIterator, FusedIterator},
     ops::{BitAnd, BitOr, Shl, Shr},
 };
 
@@ -197,10 +198,22 @@ impl IndexSet {
     /// Iterate over all slot indices present in the set, in ascending order.
     #[inline]
     pub fn iter<'a>(&'a self) -> IndexSetIter<'a> {
+        let max = self.max_chunks().saturating_sub(1);
         IndexSetIter {
             inner: self,
-            current_chunk: 0,
-            current_bits: self.get_first_chunk(),
+            front_chunk: 0,
+            front_bits: self.get_first_chunk(),
+            back_chunk: max,
+            back_bits: if max == 0 {
+                self.get_first_chunk()
+            } else {
+                match self {
+                    IndexSet::Large(b) => (*b >> 64) as u64,
+                    IndexSet::Heap(v) => v.last().copied().unwrap_or(0),
+                    _ => unreachable!("Small/Medium have only one chunk"),
+                }
+            },
+            remaining: self.count_ones(),
         }
     }
 
@@ -592,43 +605,91 @@ impl Shr<usize> for IndexSet {
 /// Produces indices in ascending order.
 pub struct IndexSetIter<'a> {
     inner: &'a IndexSet,
-    current_chunk: usize,
-    current_bits: u64,
+    front_chunk: usize,
+    front_bits: u64,
+    back_chunk: usize,
+    back_bits: u64,
+    remaining: usize,
+}
+
+impl IndexSetIter<'_> {
+    #[inline]
+    fn chunk_bits(&self, chunk: usize) -> u64 {
+        match self.inner {
+            IndexSet::Small(bits) if chunk == 0 => *bits as u64,
+            IndexSet::Medium(bits) if chunk == 0 => *bits,
+            IndexSet::Large(bits) if chunk == 0 => *bits as u64,
+            IndexSet::Large(bits) if chunk == 1 => (*bits >> 64) as u64,
+            IndexSet::Heap(vec) => vec.get(chunk).copied().unwrap_or(0),
+            _ => 0,
+        }
+    }
 }
 
 impl<'a> Iterator for IndexSetIter<'a> {
     type Item = usize;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if self.current_bits != 0 {
-                let tz = self.current_bits.trailing_zeros() as usize;
-                self.current_bits &= self.current_bits - 1;
-                return Some((self.current_chunk * 64) + tz);
+            if self.front_bits != 0 {
+                let tz = self.front_bits.trailing_zeros() as usize;
+                let mask = 1u64 << tz;
+                self.front_bits &= !mask;
+                if self.front_chunk == self.back_chunk {
+                    self.back_bits &= !mask;
+                }
+                self.remaining -= 1;
+                return Some(self.front_chunk * 64 + tz);
             }
 
-            self.current_chunk += 1;
-            self.current_bits = match self.inner {
-                IndexSet::Small(_) | IndexSet::Medium(_) | IndexSet::Large(_) => {
-                    if self.current_chunk == 1 {
-                        if let IndexSet::Large(b) = self.inner {
-                            (*b >> 64) as u64
-                        } else {
-                            0
-                        }
-                    } else {
-                        0
-                    }
-                }
-                IndexSet::Heap(vec) => vec.get(self.current_chunk).copied().unwrap_or(0),
-            };
-
-            if self.current_bits == 0 && self.current_chunk >= self.inner.max_chunks() {
+            if self.remaining == 0 {
                 return None;
             }
+
+            self.front_chunk += 1;
+            self.front_bits = self.chunk_bits(self.front_chunk);
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<'a> DoubleEndedIterator for IndexSetIter<'a> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.back_bits != 0 {
+                let lz = self.back_bits.ilog2() as usize;
+                let mask = 1u64 << lz;
+                self.back_bits &= !mask;
+                if self.front_chunk == self.back_chunk {
+                    self.front_bits &= !mask;
+                }
+                self.remaining -= 1;
+                return Some(self.back_chunk * 64 + lz);
+            }
+
+            if self.remaining == 0 {
+                return None;
+            }
+
+            if self.back_chunk == 0 {
+                self.remaining = 0;
+                return None;
+            }
+            self.back_chunk -= 1;
+            self.back_bits = self.chunk_bits(self.back_chunk);
         }
     }
 }
+
+impl<'a> ExactSizeIterator for IndexSetIter<'a> {}
+
+impl<'a> FusedIterator for IndexSetIter<'a> {}
 
 #[cfg(test)]
 mod tests {
@@ -689,6 +750,30 @@ mod tests {
         s.insert(0, true);
         let v: Vec<_> = s.iter().collect();
         assert_eq!(v, vec![0, 100, 200]);
+    }
+
+    #[test]
+    fn test_iter_rev_and_exact() {
+        let mut s = IndexSet::singleton(200);
+        s.insert(100, true);
+        s.insert(0, true);
+        assert_eq!(s.iter().rev().collect::<Vec<_>>(), vec![200, 100, 0]);
+        let mut it = s.iter();
+        it.next();
+        assert_eq!(it.len(), 2);
+    }
+
+    #[test]
+    fn test_iter_mixed() {
+        let mut s = IndexSet::singleton(200);
+        s.insert(5, true);
+        s.insert(0, true);
+        let mut it = s.iter();
+        assert_eq!(it.next(), Some(0));
+        assert_eq!(it.next_back(), Some(200));
+        assert_eq!(it.next(), Some(5));
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next_back(), None);
     }
 
     #[test]
