@@ -313,6 +313,24 @@ impl PartialEq for IndexSet {
     }
 }
 
+impl PartialOrd for IndexSet {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IndexSet {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (IndexSet::Small(a), IndexSet::Small(b)) => a.cmp(b),
+            (IndexSet::Medium(a), IndexSet::Medium(b)) => a.cmp(b),
+            (IndexSet::Large(a), IndexSet::Large(b)) => a.cmp(b),
+            // Compare from the highest bit down — same as integer cmp.
+            _ => self.iter().rev().cmp(other.iter().rev()),
+        }
+    }
+}
+
 impl Hash for IndexSet {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -954,5 +972,22 @@ mod tests {
         let s = IndexSet::singleton(0) | IndexSet::singleton(5) | IndexSet::singleton(100);
         let shifted = s.clone() << 7 >> 7;
         assert_eq!(shifted, s);
+    }
+
+    #[test]
+    fn test_ord_same_variant() {
+        assert!(IndexSet::Small(0b001) < IndexSet::Small(0b010));
+        assert!(IndexSet::Small(0b010) > IndexSet::Small(0b001));
+        assert_eq!(IndexSet::Small(0b101), IndexSet::Small(0b101));
+        assert!(IndexSet::Medium(0b001) < IndexSet::Medium(0b010));
+        assert!(IndexSet::Large(0b001) < IndexSet::Large(0b010));
+    }
+
+    #[test]
+    fn test_ord_cross_variant() {
+        assert_eq!(IndexSet::Small(0b11), IndexSet::Medium(0b11));
+        assert_eq!(IndexSet::Medium(0b11), IndexSet::Large(0b11));
+        assert_eq!(IndexSet::Large(0b11), IndexSet::Heap(vec![0b11]));
+        assert!(IndexSet::Small(0b100) > IndexSet::Large(0b010));
     }
 }
