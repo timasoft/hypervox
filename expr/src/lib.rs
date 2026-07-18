@@ -4,7 +4,7 @@ use std::{
 };
 
 pub mod index_set;
-pub use index_set::IndexSet;
+pub use index_set::{ArithIndexSet, IndexSet};
 
 /// Structured error type for expression parsing.
 #[derive(Debug, Clone, PartialEq)]

@@ -1,7 +1,7 @@
 use std::{
     hash::{Hash, Hasher},
     iter::{ExactSizeIterator, FusedIterator},
-    ops::{BitAnd, BitOr, Shl, Shr},
+    ops::{Add, BitAnd, BitOr, Shl, Shr, Sub},
 };
 
 /// A compact bitset for tracking slot indices in CSE.
@@ -299,6 +299,17 @@ impl IndexSet {
             IndexSet::Medium(v) if (v as u32 as u64) == v => IndexSet::Small(v as u32),
             other => other,
         };
+    }
+}
+
+impl From<IndexSet> for Vec<u64> {
+    fn from(set: IndexSet) -> Self {
+        match set {
+            IndexSet::Small(bits) => vec![bits as u64],
+            IndexSet::Medium(bits) => vec![bits],
+            IndexSet::Large(bits) => vec![bits as u64, (bits >> 64) as u64],
+            IndexSet::Heap(vec) => vec,
+        }
     }
 }
 
@@ -709,6 +720,249 @@ impl<'a> ExactSizeIterator for IndexSetIter<'a> {}
 
 impl<'a> FusedIterator for IndexSetIter<'a> {}
 
+/// A type around [`IndexSet`] providing BigUint-like arithmetic.
+///
+/// Treats the bitset as an unsigned integer:
+/// `Add` performs binary addition with carry propagation;
+/// `Sub` performs binary subtraction with borrow (panics on underflow).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArithIndexSet(pub IndexSet);
+
+impl From<IndexSet> for ArithIndexSet {
+    #[inline]
+    fn from(set: IndexSet) -> Self {
+        ArithIndexSet(set)
+    }
+}
+
+impl From<ArithIndexSet> for IndexSet {
+    #[inline]
+    fn from(set: ArithIndexSet) -> Self {
+        set.0
+    }
+}
+
+impl From<u8> for ArithIndexSet {
+    #[inline]
+    fn from(value: u8) -> Self {
+        ArithIndexSet(IndexSet::Small(value as u32))
+    }
+}
+
+impl From<u16> for ArithIndexSet {
+    #[inline]
+    fn from(value: u16) -> Self {
+        ArithIndexSet(IndexSet::Small(value as u32))
+    }
+}
+
+impl From<u32> for ArithIndexSet {
+    #[inline]
+    fn from(value: u32) -> Self {
+        ArithIndexSet(IndexSet::Small(value))
+    }
+}
+
+impl From<u64> for ArithIndexSet {
+    #[inline]
+    fn from(value: u64) -> Self {
+        ArithIndexSet(IndexSet::Medium(value))
+    }
+}
+
+impl From<u128> for ArithIndexSet {
+    #[inline]
+    fn from(value: u128) -> Self {
+        ArithIndexSet(IndexSet::Large(value))
+    }
+}
+
+impl From<usize> for ArithIndexSet {
+    #[inline]
+    #[cfg(target_pointer_width = "32")]
+    fn from(value: usize) -> Self {
+        ArithIndexSet(IndexSet::Small(value as u32))
+    }
+
+    #[inline]
+    #[cfg(target_pointer_width = "64")]
+    fn from(value: usize) -> Self {
+        ArithIndexSet(IndexSet::Medium(value as u64))
+    }
+}
+
+impl std::ops::Deref for ArithIndexSet {
+    type Target = IndexSet;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ArithIndexSet {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Add for ArithIndexSet {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        let s =
+            match (self.0, rhs.0) {
+                (IndexSet::Small(a), IndexSet::Small(b)) => add_small(a, b),
+                (IndexSet::Small(b), IndexSet::Medium(a))
+                | (IndexSet::Medium(a), IndexSet::Small(b)) => add_medium(a, b as u64),
+                (IndexSet::Medium(a), IndexSet::Medium(b)) => add_medium(a, b),
+                (IndexSet::Small(b), IndexSet::Large(a))
+                | (IndexSet::Large(a), IndexSet::Small(b)) => add_large(a, b as u128),
+                (IndexSet::Medium(b), IndexSet::Large(a))
+                | (IndexSet::Large(a), IndexSet::Medium(b)) => add_large(a, b as u128),
+                (IndexSet::Large(a), IndexSet::Large(b)) => add_large(a, b),
+                (IndexSet::Small(b), IndexSet::Heap(a))
+                | (IndexSet::Heap(a), IndexSet::Small(b)) => add_heap(a, b as u64),
+                (IndexSet::Medium(b), IndexSet::Heap(a))
+                | (IndexSet::Heap(a), IndexSet::Medium(b)) => add_heap(a, b),
+                (a, b) => {
+                    let a: Vec<u64> = a.into();
+                    let b: Vec<u64> = b.into();
+                    let max_len = a.len().max(b.len());
+                    let mut result = Vec::with_capacity(max_len + 1);
+                    let mut carry: bool = false;
+                    for i in 0..max_len {
+                        let av = a.get(i).copied().unwrap_or(0);
+                        let bv = b.get(i).copied().unwrap_or(0);
+                        let (sum, ov1) = av.overflowing_add(bv);
+                        let (sum2, ov2) = sum.overflowing_add(u64::from(carry));
+                        result.push(sum2);
+                        carry = ov1 || ov2;
+                    }
+                    if carry {
+                        result.push(1);
+                    }
+                    IndexSet::Heap(result)
+                }
+            };
+        ArithIndexSet(s)
+    }
+}
+
+#[inline]
+fn add_small(a: u32, b: u32) -> IndexSet {
+    let (wrapped, overflow) = a.overflowing_add(b);
+    if overflow {
+        IndexSet::Medium((1u64 << 32) | (wrapped as u64))
+    } else {
+        IndexSet::Small(wrapped)
+    }
+}
+
+#[inline]
+fn add_medium(a: u64, b: u64) -> IndexSet {
+    let (wrapped, overflow) = a.overflowing_add(b);
+    if overflow {
+        IndexSet::Large((1u128 << 64) | (wrapped as u128))
+    } else {
+        IndexSet::Medium(wrapped)
+    }
+}
+
+#[inline]
+fn add_large(a: u128, b: u128) -> IndexSet {
+    let (wrapped, overflow) = a.overflowing_add(b);
+    if overflow {
+        IndexSet::Heap(vec![wrapped as u64, (wrapped >> 64) as u64, 1])
+    } else {
+        IndexSet::Large(wrapped)
+    }
+}
+
+#[inline]
+fn add_heap(mut a: Vec<u64>, b: u64) -> IndexSet {
+    let mut carry = b;
+    for item in a.iter_mut() {
+        let (sum, ov) = item.overflowing_add(carry);
+        *item = sum;
+        carry = u64::from(ov);
+        if carry == 0 {
+            break;
+        }
+    }
+    if carry > 0 {
+        a.push(carry);
+    }
+    IndexSet::Heap(a)
+}
+
+impl Sub for ArithIndexSet {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self {
+        assert!(self.0 >= rhs.0, "attempt to subtract with overflow");
+        let s = match (self.0, rhs.0) {
+            (IndexSet::Small(a), IndexSet::Small(b)) => IndexSet::Small(a - b),
+            (IndexSet::Small(a), IndexSet::Medium(b)) => IndexSet::Medium(a as u64 - b),
+            (IndexSet::Medium(a), IndexSet::Small(b)) => IndexSet::Medium(a - b as u64),
+            (IndexSet::Medium(a), IndexSet::Medium(b)) => IndexSet::Medium(a - b),
+            (IndexSet::Small(a), IndexSet::Large(b)) => IndexSet::Large(a as u128 - b),
+            (IndexSet::Large(a), IndexSet::Small(b)) => IndexSet::Large(a - b as u128),
+            (IndexSet::Medium(a), IndexSet::Large(b)) => IndexSet::Large(a as u128 - b),
+            (IndexSet::Large(a), IndexSet::Medium(b)) => IndexSet::Large(a - b as u128),
+            (IndexSet::Large(a), IndexSet::Large(b)) => IndexSet::Large(a - b),
+            (IndexSet::Small(a), IndexSet::Heap(b)) => {
+                IndexSet::Small(a - b.first().copied().unwrap_or(0) as u32)
+            }
+            (IndexSet::Heap(a), IndexSet::Small(b)) => sub_heap(a, b as u64),
+            (IndexSet::Medium(a), IndexSet::Heap(b)) => {
+                IndexSet::Medium(a - b.first().copied().unwrap_or(0))
+            }
+            (IndexSet::Heap(a), IndexSet::Medium(b)) => sub_heap(a, b),
+            (a, b) => {
+                let a: Vec<u64> = a.into();
+                let b: Vec<u64> = b.into();
+                let mut result = Vec::with_capacity(a.len());
+                let mut borrow: bool = false;
+                for i in 0..a.len() {
+                    let av = a.get(i).copied().unwrap_or(0);
+                    let bv = b.get(i).copied().unwrap_or(0);
+                    let (diff, ov1) = av.overflowing_sub(bv);
+                    let (diff2, ov2) = diff.overflowing_sub(u64::from(borrow));
+                    result.push(diff2);
+                    borrow = ov1 || ov2;
+                }
+                debug_assert!(
+                    !borrow,
+                    "subtraction underflow should have been caught earlier"
+                );
+                IndexSet::Heap(result)
+            }
+        }
+        .minimized();
+        ArithIndexSet(s)
+    }
+}
+
+#[inline]
+fn sub_heap(a: Vec<u64>, b: u64) -> IndexSet {
+    let mut result = a;
+    let mut borrow = b;
+    for item in result.iter_mut() {
+        let (diff, ov) = item.overflowing_sub(borrow);
+        *item = diff;
+        borrow = u64::from(ov);
+        if borrow == 0 {
+            break;
+        }
+    }
+    debug_assert_eq!(
+        borrow, 0,
+        "subtraction underflow should have been caught earlier"
+    );
+    IndexSet::Heap(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -989,5 +1243,90 @@ mod tests {
         assert_eq!(IndexSet::Medium(0b11), IndexSet::Large(0b11));
         assert_eq!(IndexSet::Large(0b11), IndexSet::Heap(vec![0b11]));
         assert!(IndexSet::Small(0b100) > IndexSet::Large(0b010));
+    }
+
+    #[test]
+    fn test_arith_add_small() {
+        let a = ArithIndexSet(IndexSet::Small(5));
+        let b = ArithIndexSet(IndexSet::Small(3));
+        let c = a + b;
+        assert_eq!(c.0, IndexSet::Small(8));
+    }
+
+    #[test]
+    fn test_arith_add_with_carry() {
+        let a = ArithIndexSet(IndexSet::Small(u32::MAX));
+        let b = ArithIndexSet(IndexSet::Small(1));
+        let c = a + b;
+        assert!(!matches!(c.0, IndexSet::Small(_)));
+        assert_eq!(c.0.count_ones(), 1);
+        assert!(c.0.contains(32));
+    }
+
+    #[test]
+    fn test_arith_add_large_overflow() {
+        let a = ArithIndexSet(IndexSet::Large(u128::MAX));
+        let b = ArithIndexSet(IndexSet::Large(1));
+        let c = a + b;
+        if let IndexSet::Heap(v) = &c.0 {
+            assert_eq!(v.len(), 3);
+            assert_eq!(v[2], 1);
+        } else {
+            panic!("expected Heap variant");
+        }
+    }
+
+    #[test]
+    fn test_arith_sub_small() {
+        let a = ArithIndexSet(IndexSet::Small(8));
+        let b = ArithIndexSet(IndexSet::Small(3));
+        let c = a - b;
+        assert_eq!(c.0, IndexSet::Small(5));
+    }
+
+    #[test]
+    fn test_arith_sub_underflow_panics() {
+        let a = ArithIndexSet(IndexSet::Small(3));
+        let b = ArithIndexSet(IndexSet::Small(8));
+        assert!(std::panic::catch_unwind(move || a - b).is_err());
+    }
+
+    #[test]
+    fn test_arith_from_conversion() {
+        let s = IndexSet::Small(42);
+        let a: ArithIndexSet = s.into();
+        let back: IndexSet = a.into();
+        assert_eq!(back, IndexSet::Small(42));
+    }
+
+    #[test]
+    fn test_arith_deref() {
+        let a = ArithIndexSet(IndexSet::Small(0b101));
+        assert!(a.contains(0));
+        assert!(a.contains(2));
+    }
+
+    #[test]
+    fn test_arith_add_heap_fallback() {
+        let a = ArithIndexSet(IndexSet::Heap(vec![u64::MAX, u64::MAX, 1]));
+        let b = ArithIndexSet(IndexSet::Heap(vec![1, 0, 1]));
+        let c = a + b;
+        if let IndexSet::Heap(v) = c.0 {
+            assert_eq!(v, vec![0, 0, 3]);
+        } else {
+            panic!("expected Heap variant");
+        }
+    }
+
+    #[test]
+    fn test_arith_sub_heap_fallback() {
+        let a = ArithIndexSet(IndexSet::Heap(vec![2, 1, 1]));
+        let b = ArithIndexSet(IndexSet::Heap(vec![1, 1, 0]));
+        let c = a - b;
+        if let IndexSet::Heap(v) = c.0 {
+            assert_eq!(v, vec![1, 0, 1]);
+        } else {
+            panic!("expected Heap variant");
+        }
     }
 }
