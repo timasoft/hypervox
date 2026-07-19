@@ -809,9 +809,21 @@ impl std::ops::DerefMut for ArithIndexSet {
 impl Add for ArithIndexSet {
     type Output = Self;
 
+    #[inline]
     fn add(self, rhs: Self) -> Self {
-        let s =
-            match (self.0, rhs.0) {
+        self.overflowing_add(rhs).0
+    }
+}
+
+impl ArithIndexSet {
+    /// Integer addition with overflow. Returns `(sum, overflowed)`
+    ///
+    /// `overflowed` is `true` if the result promoted to a larger variant.
+    #[must_use]
+    pub fn overflowing_add(self, rhs: Self) -> (Self, bool) {
+        let (a, b) = (self.0, rhs.0);
+        let (inner, overflow) =
+            match (a, b) {
                 (IndexSet::Small(a), IndexSet::Small(b)) => add_small(a, b),
                 (IndexSet::Small(b), IndexSet::Medium(a))
                 | (IndexSet::Medium(a), IndexSet::Small(b)) => add_medium(a, b as u64),
@@ -842,45 +854,61 @@ impl Add for ArithIndexSet {
                     if carry {
                         result.push(1);
                     }
-                    IndexSet::Heap(result)
+                    (IndexSet::Heap(result), carry)
                 }
             };
-        ArithIndexSet(s)
+        (ArithIndexSet(inner), overflow)
+    }
+
+    /// Checked addition. Returns `None` if the result would overflow the
+    /// representation (would require promotion to a larger variant).
+    #[inline]
+    #[must_use]
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        let (result, overflow) = self.overflowing_add(rhs);
+        if overflow {
+            None
+        } else {
+            Some(ArithIndexSet(result.0.minimized()))
+        }
     }
 }
 
 #[inline]
-fn add_small(a: u32, b: u32) -> IndexSet {
+fn add_small(a: u32, b: u32) -> (IndexSet, bool) {
     let (wrapped, overflow) = a.overflowing_add(b);
     if overflow {
-        IndexSet::Medium((1u64 << 32) | (wrapped as u64))
+        (IndexSet::Medium((1u64 << 32) | (wrapped as u64)), true)
     } else {
-        IndexSet::Small(wrapped)
+        (IndexSet::Small(wrapped), false)
     }
 }
 
 #[inline]
-fn add_medium(a: u64, b: u64) -> IndexSet {
+fn add_medium(a: u64, b: u64) -> (IndexSet, bool) {
     let (wrapped, overflow) = a.overflowing_add(b);
     if overflow {
-        IndexSet::Large((1u128 << 64) | (wrapped as u128))
+        (IndexSet::Large((1u128 << 64) | (wrapped as u128)), true)
     } else {
-        IndexSet::Medium(wrapped)
+        (IndexSet::Medium(wrapped), false)
     }
 }
 
 #[inline]
-fn add_large(a: u128, b: u128) -> IndexSet {
+fn add_large(a: u128, b: u128) -> (IndexSet, bool) {
     let (wrapped, overflow) = a.overflowing_add(b);
     if overflow {
-        IndexSet::Heap(vec![wrapped as u64, (wrapped >> 64) as u64, 1])
+        (
+            IndexSet::Heap(vec![wrapped as u64, (wrapped >> 64) as u64, 1]),
+            true,
+        )
     } else {
-        IndexSet::Large(wrapped)
+        (IndexSet::Large(wrapped), false)
     }
 }
 
 #[inline]
-fn add_heap(mut a: Vec<u64>, b: u64) -> IndexSet {
+fn add_heap(mut a: Vec<u64>, b: u64) -> (IndexSet, bool) {
     let mut carry = b;
     for item in a.iter_mut() {
         let (sum, ov) = item.overflowing_add(carry);
@@ -890,18 +918,35 @@ fn add_heap(mut a: Vec<u64>, b: u64) -> IndexSet {
             break;
         }
     }
-    if carry > 0 {
+    let overflow = carry > 0;
+    if overflow {
         a.push(carry);
     }
-    IndexSet::Heap(a)
+    (IndexSet::Heap(a), overflow)
 }
 
 impl Sub for ArithIndexSet {
     type Output = Self;
 
+    #[inline]
     fn sub(self, rhs: Self) -> Self {
-        assert!(self.0 >= rhs.0, "attempt to subtract with overflow");
-        let s = match (self.0, rhs.0) {
+        let (result, underflow) = self.overflowing_sub(rhs);
+        assert!(!underflow, "attempt to subtract with overflow");
+        result
+    }
+}
+
+impl ArithIndexSet {
+    /// Integer subtraction with underflow. Returns `(diff, underflow)`
+    ///
+    /// `underflow` is `true` if `self < rhs` (result clamped to 0).
+    #[must_use]
+    pub fn overflowing_sub(self, rhs: Self) -> (Self, bool) {
+        let (a, b) = (self.0, rhs.0);
+        if a < b {
+            return (ArithIndexSet(IndexSet::Small(0)), true);
+        }
+        let inner = match (a, b) {
             (IndexSet::Small(a), IndexSet::Small(b)) => IndexSet::Small(a - b),
             (IndexSet::Small(a), IndexSet::Medium(b)) => IndexSet::Medium(a as u64 - b),
             (IndexSet::Medium(a), IndexSet::Small(b)) => IndexSet::Medium(a - b as u64),
@@ -940,7 +985,15 @@ impl Sub for ArithIndexSet {
             }
         }
         .minimized();
-        ArithIndexSet(s)
+        (ArithIndexSet(inner), false)
+    }
+
+    /// Checked subtraction. Returns `None` if `self < rhs` (underflow).
+    #[inline]
+    #[must_use]
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        let (result, underflow) = self.overflowing_sub(rhs);
+        if underflow { None } else { Some(result) }
     }
 }
 
