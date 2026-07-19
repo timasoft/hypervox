@@ -1,7 +1,10 @@
 use std::{
     hash::{Hash, Hasher},
     iter::{ExactSizeIterator, FusedIterator},
-    ops::{Add, BitAnd, BitOr, Shl, Shr, Sub},
+    ops::{
+        Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, Shl, ShlAssign, Shr, ShrAssign,
+        Sub, SubAssign,
+    },
 };
 
 /// A compact bitset for tracking slot indices in CSE.
@@ -428,6 +431,13 @@ impl BitOr for IndexSet {
     }
 }
 
+impl BitOrAssign for IndexSet {
+    #[inline]
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = std::mem::take(self) | rhs;
+    }
+}
+
 impl BitAnd for IndexSet {
     type Output = Self;
 
@@ -498,6 +508,13 @@ impl BitAnd for IndexSet {
             }
         }
         .minimized()
+    }
+}
+
+impl BitAndAssign for IndexSet {
+    #[inline]
+    fn bitand_assign(&mut self, rhs: Self) {
+        *self = std::mem::take(self) & rhs;
     }
 }
 
@@ -574,6 +591,13 @@ impl Shl<usize> for IndexSet {
     }
 }
 
+impl ShlAssign<usize> for IndexSet {
+    #[inline]
+    fn shl_assign(&mut self, rhs: usize) {
+        *self = std::mem::take(self) << rhs;
+    }
+}
+
 impl Shr<usize> for IndexSet {
     type Output = Self;
 
@@ -626,6 +650,13 @@ impl Shr<usize> for IndexSet {
             }
         }
         .minimized()
+    }
+}
+
+impl ShrAssign<usize> for IndexSet {
+    #[inline]
+    fn shr_assign(&mut self, rhs: usize) {
+        *self = std::mem::take(self) >> rhs;
     }
 }
 
@@ -723,9 +754,9 @@ impl<'a> FusedIterator for IndexSetIter<'a> {}
 /// A type around [`IndexSet`] providing BigUint-like arithmetic.
 ///
 /// Treats the bitset as an unsigned integer:
-/// `Add` performs binary addition with carry propagation;
-/// `Sub` performs binary subtraction with borrow (panics on underflow).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// `Add` / `AddAssign` perform binary addition with carry propagation;
+/// `Sub` / `SubAssign` perform binary subtraction with borrow (panics on underflow).
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ArithIndexSet(pub IndexSet);
 
 impl From<IndexSet> for ArithIndexSet {
@@ -812,6 +843,13 @@ impl Add for ArithIndexSet {
     #[inline]
     fn add(self, rhs: Self) -> Self {
         self.overflowing_add(rhs).0
+    }
+}
+
+impl AddAssign for ArithIndexSet {
+    #[inline]
+    fn add_assign(&mut self, rhs: Self) {
+        *self = std::mem::take(self) + rhs;
     }
 }
 
@@ -933,6 +971,13 @@ impl Sub for ArithIndexSet {
         let (result, underflow) = self.overflowing_sub(rhs);
         assert!(!underflow, "attempt to subtract with overflow");
         result
+    }
+}
+
+impl SubAssign for ArithIndexSet {
+    #[inline]
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = std::mem::take(self) - rhs;
     }
 }
 
@@ -1369,6 +1414,24 @@ mod tests {
         } else {
             panic!("expected Heap variant");
         }
+    }
+
+    #[test]
+    fn test_bitor_assign() {
+        let mut a = IndexSet::singleton(0);
+        let b = IndexSet::singleton(1);
+        a |= b;
+        assert!(a.contains(0));
+        assert!(a.contains(1));
+    }
+
+    #[test]
+    fn test_arith_assign() {
+        let mut a = ArithIndexSet(IndexSet::Small(5));
+        a += ArithIndexSet(IndexSet::Small(3));
+        assert_eq!(a.0, IndexSet::Small(8));
+        a -= ArithIndexSet(IndexSet::Small(3));
+        assert_eq!(a.0, IndexSet::Small(5));
     }
 
     #[test]
