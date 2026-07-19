@@ -822,6 +822,93 @@ impl From<usize> for ArithIndexSet {
     }
 }
 
+impl ArithIndexSet {
+    /// Convert to `u128` if the value fits in 128 bits.
+    ///
+    /// Returns `None` for `Heap` variants with more than 2 chunks.
+    #[inline]
+    pub fn to_u128(&self) -> Option<u128> {
+        match &self.0 {
+            IndexSet::Small(v) => Some(*v as u128),
+            IndexSet::Medium(v) => Some(*v as u128),
+            IndexSet::Large(v) => Some(*v),
+            IndexSet::Heap(v) => {
+                let required = v.iter().rposition(|&chunk| chunk != 0).map_or(0, |i| i + 1);
+                match required {
+                    0 => Some(0),
+                    1 => Some(v[0] as u128),
+                    2 => Some(v[0] as u128 | (v[1] as u128) << 64),
+                    _ => None,
+                }
+            }
+        }
+    }
+}
+
+/// Error type for `TryFrom` conversions involving `ArithIndexSet`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithIndexSetTryFromError {
+    /// The source value exceeds the target type's range.
+    Overflow,
+    /// The source value is negative (only for signed-to-`ArithIndexSet`).
+    Negative,
+}
+
+impl std::fmt::Display for ArithIndexSetTryFromError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArithIndexSetTryFromError::Overflow => {
+                write!(f, "value too large for target type")
+            }
+            ArithIndexSetTryFromError::Negative => {
+                write!(f, "negative value cannot be represented as ArithIndexSet")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ArithIndexSetTryFromError {}
+
+macro_rules! impl_try_from_arith {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl TryFrom<ArithIndexSet> for $ty {
+                type Error = ArithIndexSetTryFromError;
+
+                #[inline]
+                fn try_from(value: ArithIndexSet) -> Result<Self, Self::Error> {
+                    let v = value.to_u128().ok_or(ArithIndexSetTryFromError::Overflow)?;
+                    <$ty>::try_from(v).map_err(|_| ArithIndexSetTryFromError::Overflow)
+                }
+            }
+        )+
+    };
+}
+
+macro_rules! impl_try_from_int_to_arith {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl TryFrom<$ty> for ArithIndexSet {
+                type Error = ArithIndexSetTryFromError;
+
+                #[inline]
+                fn try_from(value: $ty) -> Result<Self, Self::Error> {
+                    if value < 0 {
+                        Err(ArithIndexSetTryFromError::Negative)
+                    } else {
+                        Ok(ArithIndexSet::from(value.unsigned_abs()))
+                    }
+                }
+            }
+        )+
+    };
+}
+
+impl_try_from_arith!(
+    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize
+);
+impl_try_from_int_to_arith!(i8, i16, i32, i64, i128, isize);
+
 impl std::ops::Deref for ArithIndexSet {
     type Target = IndexSet;
     #[inline]
@@ -1444,5 +1531,31 @@ mod tests {
         } else {
             panic!("expected Heap variant");
         }
+    }
+
+    #[test]
+    fn test_try_from_arith_to_int() {
+        assert_eq!(u32::try_from(ArithIndexSet(IndexSet::Small(42))), Ok(42));
+        assert_eq!(
+            u8::try_from(ArithIndexSet(IndexSet::Small(256))),
+            Err(ArithIndexSetTryFromError::Overflow)
+        );
+        assert_eq!(i16::try_from(ArithIndexSet(IndexSet::Small(100))), Ok(100));
+        assert_eq!(
+            i8::try_from(ArithIndexSet(IndexSet::Small(200))),
+            Err(ArithIndexSetTryFromError::Overflow)
+        );
+    }
+
+    #[test]
+    fn test_try_from_int_to_arith() {
+        assert_eq!(
+            ArithIndexSet::try_from(-1i32),
+            Err(ArithIndexSetTryFromError::Negative)
+        );
+        assert_eq!(
+            ArithIndexSet::try_from(42i32),
+            Ok(ArithIndexSet::from(42u32))
+        );
     }
 }
