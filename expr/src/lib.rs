@@ -277,7 +277,7 @@ pub fn f2_list() -> String {
 }
 
 pub struct InvariantGroup {
-    pub level: u8,
+    pub level: usize,
     pub combined: CompiledExpr,
 }
 
@@ -1018,13 +1018,13 @@ impl Node {
         let masks: Vec<IndexSet> = {
             let rest = &spatial_dims[1..];
             let n = rest.len();
-            let total = 1u8 << n;
+            let total = ArithIndexSet(IndexSet::singleton(n));
             let mut masks_by_popcount: Vec<Vec<IndexSet>> = vec![Vec::new(); n + 2];
             // generate only masks containing spatial_dims[0], skipping full set
-            for bits in 0..(total - 1) {
+            for bits in total.range_to().rev().skip(1) {
                 let mut msk = IndexSet::singleton(spatial_dims[0]);
                 for (i, &dim) in rest.iter().enumerate() {
-                    if (bits >> i) & 1 == 1 {
+                    if bits.contains(i) {
                         msk.insert(dim, true);
                     }
                 }
@@ -1041,7 +1041,7 @@ impl Node {
                 let level = spatial_dims
                     .iter()
                     .take_while(|&&d| mask.contains(d))
-                    .count() as u8;
+                    .count();
                 groups.push(InvariantGroup { level, combined });
             }
         }
@@ -2265,5 +2265,37 @@ mod tests {
                 kind: ParseErrorKind::ExpectedRParen(_)
             }
         ));
+    }
+
+    #[test]
+    fn test_compile_multi_10_dim() {
+        let dim = TestVars { ndim: 10 };
+        let expr = "x0*x0 + x1*x1 + x2*x2 + x3*x3 + x4*x4 + x5*x5 + x6*x6 + x7*x7 + x8*x8 + x9*x9";
+        let vars = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let expected: f64 = vars.iter().map(|v| v * v).sum();
+        let tol = 1e-12;
+
+        // compile_multi with 10 spatial dims
+        let mut node = parse(expr, &dim).unwrap();
+        node.pre_eval(&[]);
+        let multi = node.compile_multi(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let mut cache = vec![0.0; multi.cse_slots];
+        for g in &multi.groups {
+            (g.combined)(&vars, &mut cache);
+        }
+        let result = (multi.main)(&vars, &mut cache);
+
+        // Reference: direct compile (no multi)
+        let node_ref = parse(expr, &dim).unwrap();
+        let reference = node_ref.compile()(&vars, &mut []);
+
+        assert!(
+            (result - reference).abs() < tol,
+            "compile_multi(10-dim)={result} != reference={reference}"
+        );
+        assert!(
+            (result - expected).abs() < tol,
+            "compile_multi(10-dim)={result} != expected={expected}"
+        );
     }
 }
