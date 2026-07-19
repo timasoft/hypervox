@@ -663,6 +663,7 @@ impl ShrAssign<usize> for IndexSet {
 /// An iterator over the slot indices contained in an [`IndexSet`].
 ///
 /// Produces indices in ascending order.
+#[derive(Debug, Clone)]
 pub struct IndexSetIter<'a> {
     inner: &'a IndexSet,
     front_chunk: usize,
@@ -1151,6 +1152,7 @@ fn sub_heap(a: Vec<u64>, b: u64) -> IndexSet {
 /// A range of [`ArithIndexSet`] values that can be iterated over.
 ///
 /// Created with [`ArithIndexSet::range`].
+#[derive(Debug, Clone)]
 pub struct ArithRangeIter {
     start: ArithIndexSet,
     end: ArithIndexSet,
@@ -1159,6 +1161,7 @@ pub struct ArithRangeIter {
 /// An infinite iterator over [`ArithIndexSet`] values starting from a given value.
 ///
 /// Created with [`ArithIndexSet::range_from`].
+#[derive(Debug, Clone)]
 pub struct ArithRangeFrom {
     current: ArithIndexSet,
 }
