@@ -1148,6 +1148,108 @@ fn sub_heap(a: Vec<u64>, b: u64) -> IndexSet {
     IndexSet::Heap(result)
 }
 
+/// A range of [`ArithIndexSet`] values that can be iterated over.
+///
+/// Created with [`ArithIndexSet::range`].
+pub struct ArithRangeIter {
+    start: ArithIndexSet,
+    end: ArithIndexSet,
+}
+
+/// An infinite iterator over [`ArithIndexSet`] values starting from a given value.
+///
+/// Created with [`ArithIndexSet::range_from`].
+pub struct ArithRangeFrom {
+    current: ArithIndexSet,
+}
+
+impl ArithIndexSet {
+    /// Creates an iterator over `self..end` (exclusive).
+    #[inline]
+    pub fn range(self, end: ArithIndexSet) -> ArithRangeIter {
+        ArithRangeIter { start: self, end }
+    }
+
+    /// Creates an iterator over `self..` (infinite, starting from `self`).
+    #[inline]
+    pub fn range_from(self) -> ArithRangeFrom {
+        ArithRangeFrom { current: self }
+    }
+
+    /// Creates an iterator over `0..self` (exclusive, from zero).
+    #[inline]
+    pub fn range_to(self) -> ArithRangeIter {
+        ArithRangeIter {
+            start: ArithIndexSet::default(),
+            end: self,
+        }
+    }
+}
+
+impl Iterator for ArithRangeIter {
+    type Item = ArithIndexSet;
+
+    #[inline]
+    fn next(&mut self) -> Option<ArithIndexSet> {
+        if self.start < self.end {
+            let current = self.start.clone();
+            self.start += ArithIndexSet::from(1u32);
+            Some(current)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let diff =
+            if let (Some(end_val), Some(start_val)) = (self.end.to_u128(), self.start.to_u128()) {
+                end_val.saturating_sub(start_val).into()
+            } else {
+                self.end
+                    .clone()
+                    .checked_sub(self.start.clone())
+                    .unwrap_or_default()
+            };
+        match usize::try_from(diff) {
+            Ok(len) => (len, Some(len)),
+            Err(_) => (usize::MAX, None),
+        }
+    }
+}
+
+impl DoubleEndedIterator for ArithRangeIter {
+    #[inline]
+    fn next_back(&mut self) -> Option<ArithIndexSet> {
+        if self.start < self.end {
+            self.end -= ArithIndexSet::from(1u32);
+            Some(self.end.clone())
+        } else {
+            None
+        }
+    }
+}
+
+impl FusedIterator for ArithRangeIter {}
+
+impl Iterator for ArithRangeFrom {
+    type Item = ArithIndexSet;
+
+    #[inline]
+    fn next(&mut self) -> Option<ArithIndexSet> {
+        let current = self.current.clone();
+        self.current += ArithIndexSet::from(1u32);
+        Some(current)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (usize::MAX, None)
+    }
+}
+
+impl FusedIterator for ArithRangeFrom {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1557,5 +1659,62 @@ mod tests {
             ArithIndexSet::try_from(42i32),
             Ok(ArithIndexSet::from(42u32))
         );
+    }
+
+    #[test]
+    fn test_arith_range_iter() {
+        let start = ArithIndexSet::from(2u32);
+        let end = ArithIndexSet::from(7u32);
+        let results: Vec<ArithIndexSet> = start.range(end).collect();
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0], ArithIndexSet::from(2u32));
+        assert_eq!(results[1], ArithIndexSet::from(3u32));
+        assert_eq!(results[2], ArithIndexSet::from(4u32));
+        assert_eq!(results[3], ArithIndexSet::from(5u32));
+        assert_eq!(results[4], ArithIndexSet::from(6u32));
+    }
+
+    #[test]
+    fn test_arith_range_empty() {
+        let start = ArithIndexSet::from(5u32);
+        let end = ArithIndexSet::from(3u32);
+        let results: Vec<ArithIndexSet> = start.range(end).collect();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_arith_range_rev() {
+        let start = ArithIndexSet::from(0u32);
+        let end = ArithIndexSet::from(4u32);
+        let results: Vec<ArithIndexSet> = start.range(end).rev().collect();
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0], ArithIndexSet::from(3u32));
+        assert_eq!(results[3], ArithIndexSet::from(0u32));
+    }
+
+    #[test]
+    fn test_arith_range_to() {
+        let results: Vec<ArithIndexSet> = ArithIndexSet::from(4u32).range_to().collect();
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0], ArithIndexSet::from(0u32));
+        assert_eq!(results[1], ArithIndexSet::from(1u32));
+        assert_eq!(results[2], ArithIndexSet::from(2u32));
+        assert_eq!(results[3], ArithIndexSet::from(3u32));
+    }
+
+    #[test]
+    fn test_arith_range_to_zero() {
+        let results: Vec<ArithIndexSet> = ArithIndexSet::from(0u32).range_to().collect();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_arith_range_from_take() {
+        let results: Vec<ArithIndexSet> = ArithIndexSet::from(3u32).range_from().take(4).collect();
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0], ArithIndexSet::from(3u32));
+        assert_eq!(results[1], ArithIndexSet::from(4u32));
+        assert_eq!(results[2], ArithIndexSet::from(5u32));
+        assert_eq!(results[3], ArithIndexSet::from(6u32));
     }
 }
