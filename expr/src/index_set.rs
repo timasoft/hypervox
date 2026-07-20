@@ -1,3 +1,8 @@
+//! Bitset and arithmetic types for CSE slot management.
+//!
+//! [`IndexSet`] tracks which variable slots a sub-expression depends on.
+//! [`ArithIndexSet`] wraps it with BigUint-like arithmetic for enumeration.
+
 use std::{
     hash::{Hash, Hasher},
     iter::{ExactSizeIterator, FusedIterator},
@@ -32,6 +37,14 @@ impl Default for IndexSet {
 
 impl IndexSet {
     /// Create a set containing exactly one slot index.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::IndexSet;
+    /// let s = IndexSet::singleton(5);
+    /// assert!(s.contains(5));
+    /// assert!(!s.contains(4));
+    /// ```
     #[inline]
     pub fn singleton(slot: usize) -> Self {
         if slot < 32 {
@@ -52,6 +65,16 @@ impl IndexSet {
     ///
     /// Automatically promotes the representation when the slot exceeds the
     /// current variant's capacity.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::IndexSet;
+    /// let mut s = IndexSet::default();
+    /// s.insert(1, true);
+    /// assert!(s.contains(1));
+    /// s.insert(1, false);
+    /// assert!(!s.contains(1));
+    /// ```
     pub fn insert(&mut self, slot: usize, value: bool) {
         match self {
             IndexSet::Small(bits) => {
@@ -128,6 +151,16 @@ impl IndexSet {
     }
 
     /// Returns `true` if the two sets have no elements in common.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::IndexSet;
+    /// let a = IndexSet::singleton(0);
+    /// let b = IndexSet::singleton(1);
+    /// assert!(a.is_disjoint(&b));
+    /// let c = IndexSet::singleton(0);
+    /// assert!(!a.is_disjoint(&c));
+    /// ```
     pub fn is_disjoint(&self, other: &Self) -> bool {
         match (self, other) {
             (IndexSet::Small(a), IndexSet::Small(b)) => (a & b) == 0,
@@ -184,6 +217,14 @@ impl IndexSet {
     }
 
     /// Returns `true` if the given slot index is present in the set.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::IndexSet;
+    /// let s = IndexSet::singleton(3);
+    /// assert!(s.contains(3));
+    /// assert!(!s.contains(0));
+    /// ```
     #[inline]
     pub fn contains(&self, slot: usize) -> bool {
         match self {
@@ -199,6 +240,15 @@ impl IndexSet {
     }
 
     /// Iterate over all slot indices present in the set, in ascending order.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::IndexSet;
+    /// let mut s = IndexSet::singleton(2);
+    /// s.insert(5, true);
+    /// let slots: Vec<usize> = s.iter().collect();
+    /// assert_eq!(slots, vec![2, 5]);
+    /// ```
     #[inline]
     pub fn iter<'a>(&'a self) -> IndexSetIter<'a> {
         let max = self.max_chunks().saturating_sub(1);
@@ -240,6 +290,15 @@ impl IndexSet {
     }
 
     /// Returns the number of slot indices in the set (population count).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::IndexSet;
+    /// let mut s = IndexSet::singleton(0);
+    /// s.insert(2, true);
+    /// s.insert(5, true);
+    /// assert_eq!(s.count_ones(), 3);
+    /// ```
     #[inline]
     pub fn count_ones(&self) -> usize {
         match self {
@@ -250,6 +309,16 @@ impl IndexSet {
         }
     }
 
+    /// Returns `true` if the set contains no elements.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::IndexSet;
+    /// let mut s: IndexSet = Default::default();
+    /// assert!(s.is_empty());
+    /// s.insert(0, true);
+    /// assert!(!s.is_empty());
+    /// ```
     #[inline]
     pub fn is_empty(&self) -> bool {
         match self {
@@ -261,6 +330,15 @@ impl IndexSet {
     }
 
     /// Shrink to the smallest variant that can hold the current bits.
+    ///
+    /// Returns `self` for chaining; see also [`minimize`](Self::minimize).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::IndexSet;
+    /// let s = IndexSet::Large(0).minimized();
+    /// assert!(matches!(s, IndexSet::Small(_)));
+    /// ```
     #[inline]
     pub fn minimized(mut self) -> Self {
         self.minimize();
@@ -268,6 +346,16 @@ impl IndexSet {
     }
 
     /// Shrink to the smallest variant that can hold the current bits.
+    ///
+    /// Mutates `self`; see also [`minimized`](Self::minimized).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::IndexSet;
+    /// let mut s = IndexSet::Large(0);
+    /// s.minimize();
+    /// assert!(matches!(s, IndexSet::Small(_)));
+    /// ```
     pub fn minimize(&mut self) {
         *self = match std::mem::take(self) {
             IndexSet::Heap(mut vec) => {
@@ -827,6 +915,13 @@ impl ArithIndexSet {
     /// Convert to `u128` if the value fits in 128 bits.
     ///
     /// Returns `None` for `Heap` variants with more than 2 chunks.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::ArithIndexSet;
+    /// let a = ArithIndexSet::from(42u64);
+    /// assert_eq!(a.to_u128(), Some(42u128));
+    /// ```
     #[inline]
     pub fn to_u128(&self) -> Option<u128> {
         match &self.0 {
@@ -945,6 +1040,16 @@ impl ArithIndexSet {
     /// Integer addition with overflow. Returns `(sum, overflowed)`
     ///
     /// `overflowed` is `true` if the result promoted to a larger variant.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::ArithIndexSet;
+    /// let a = ArithIndexSet::from(u32::MAX);
+    /// let b = ArithIndexSet::from(1u32);
+    /// let (sum, overflowed) = a.overflowing_add(b);
+    /// assert_eq!(sum, ArithIndexSet::from(u32::MAX as u64 + 1));
+    /// assert!(overflowed);
+    /// ```
     #[must_use]
     pub fn overflowing_add(self, rhs: Self) -> (Self, bool) {
         let (a, b) = (self.0, rhs.0);
@@ -988,6 +1093,16 @@ impl ArithIndexSet {
 
     /// Checked addition. Returns `None` if the result would overflow the
     /// representation (would require promotion to a larger variant).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::ArithIndexSet;
+    /// let a = ArithIndexSet::from(5u32);
+    /// let b = ArithIndexSet::from(3u32);
+    /// assert_eq!(a.checked_add(b), Some(ArithIndexSet::from(8u32)));
+    /// let big = ArithIndexSet::from(u32::MAX);
+    /// assert_eq!(big.checked_add(ArithIndexSet::from(1u32)), None);
+    /// ```
     #[inline]
     #[must_use]
     pub fn checked_add(self, rhs: Self) -> Option<Self> {
@@ -1073,6 +1188,16 @@ impl ArithIndexSet {
     /// Integer subtraction with underflow. Returns `(diff, underflow)`
     ///
     /// `underflow` is `true` if `self < rhs` (result clamped to 0).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::ArithIndexSet;
+    /// let a = ArithIndexSet::from(3u32);
+    /// let b = ArithIndexSet::from(5u32);
+    /// let (diff, underflow) = a.overflowing_sub(b);
+    /// assert_eq!(diff, ArithIndexSet::from(0u32));
+    /// assert!(underflow);
+    /// ```
     #[must_use]
     pub fn overflowing_sub(self, rhs: Self) -> (Self, bool) {
         let (a, b) = (self.0, rhs.0);
@@ -1122,6 +1247,15 @@ impl ArithIndexSet {
     }
 
     /// Checked subtraction. Returns `None` if `self < rhs` (underflow).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::ArithIndexSet;
+    /// let a = ArithIndexSet::from(8u32);
+    /// let b = ArithIndexSet::from(3u32);
+    /// assert_eq!(a.clone().checked_sub(b.clone()), Some(ArithIndexSet::from(5u32)));
+    /// assert!(b.checked_sub(a).is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn checked_sub(self, rhs: Self) -> Option<Self> {
@@ -1168,18 +1302,49 @@ pub struct ArithRangeFrom {
 
 impl ArithIndexSet {
     /// Creates an iterator over `self..end` (exclusive).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::ArithIndexSet;
+    /// let start = ArithIndexSet::from(2u32);
+    /// let end = ArithIndexSet::from(5u32);
+    /// let values: Vec<ArithIndexSet> = start.range(end).collect();
+    /// assert_eq!(values.len(), 3);
+    /// assert_eq!(values[0], ArithIndexSet::from(2u32));
+    /// assert_eq!(values[2], ArithIndexSet::from(4u32));
+    /// ```
     #[inline]
     pub fn range(self, end: ArithIndexSet) -> ArithRangeIter {
         ArithRangeIter { start: self, end }
     }
 
     /// Creates an iterator over `self..` (infinite, starting from `self`).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::ArithIndexSet;
+    /// let values: Vec<ArithIndexSet> = ArithIndexSet::from(3u32).range_from().take(3).collect();
+    /// assert_eq!(values, vec![
+    ///     ArithIndexSet::from(3u32),
+    ///     ArithIndexSet::from(4u32),
+    ///     ArithIndexSet::from(5u32),
+    /// ]);
+    /// ```
     #[inline]
     pub fn range_from(self) -> ArithRangeFrom {
         ArithRangeFrom { current: self }
     }
 
     /// Creates an iterator over `0..self` (exclusive, from zero).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::ArithIndexSet;
+    /// let results: Vec<ArithIndexSet> = ArithIndexSet::from(4u32).range_to().collect();
+    /// assert_eq!(results.len(), 4);
+    /// assert_eq!(results[0], ArithIndexSet::from(0u32));
+    /// assert_eq!(results[3], ArithIndexSet::from(3u32));
+    /// ```
     #[inline]
     pub fn range_to(self) -> ArithRangeIter {
         ArithRangeIter {

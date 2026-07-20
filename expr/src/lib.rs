@@ -1,3 +1,12 @@
+//! Math expression parser, compiler, and CSE engine.
+//!
+//! Parses string expressions (e.g. `"sin(x)*cos(y)"`) into an AST ([`Node`]),
+//! applies constant folding ([`Node::pre_eval`]),
+//! common-subexpression elimination ([`Node::cse`]),
+//! and compiles to closures ([`Node::compile`] / [`Node::compile_multi`])
+//! for fast repeated evaluation over N-dimensional grids.
+//! Variable names are resolved through the [`VarMap`] trait.
+
 use std::{
     fmt::{self, Display},
     str::FromStr,
@@ -16,12 +25,14 @@ pub enum Error {
     Parser { col: usize, kind: ParseErrorKind },
 }
 
+/// Lexical analysis error details.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LexerErrorKind {
     UnexpectedChar(char),
     InvalidNumber(String),
 }
 
+/// Parsing error details.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseErrorKind {
     EmptyExpression,
@@ -119,6 +130,7 @@ pub trait VarMap {
     fn primary_prefix(&self) -> &str;
 }
 
+/// AST node representing a mathematical expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     Num(f64),
@@ -138,20 +150,31 @@ pub enum Node {
     CseRef(usize, IndexSet),
 }
 
+/// A compiled expression closure: `(vars, cse_cache) -> result`.
 pub type CompiledExpr = Box<dyn Fn(&[f64], &mut [f64]) -> f64 + Send + Sync>;
 
 macro_rules! define_f0 {
     ($($variant:ident => $str:literal = $body:expr),* $(,)?) => {
+        /// Constants (PI, E).
         #[derive(Debug, Clone, Copy)]
         pub enum F0 {
             $($variant,)*
         }
         impl F0 {
+            /// Evaluate the constant as an f64.
+            ///
+            /// # Examples
+            /// ```
+            /// # use hypervox_expr::F0;
+            /// let pi = F0::PI.to_num();
+            /// assert!((pi - std::f64::consts::PI).abs() < 1e-15);
+            /// ```
             pub fn to_num(self) -> f64 {
                 match self {
                     $(Self::$variant => $body,)*
                 }
             }
+            /// All constant names for display.
             pub const NAMES: &'static [&'static str] = &[$($str,)*];
         }
         impl FromStr for F0 {
@@ -168,17 +191,27 @@ macro_rules! define_f0 {
 
 macro_rules! define_f1 {
     ($($variant:ident => $str:literal = $body:expr),* $(,)?) => {
+        /// Single-argument math functions.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum F1 {
             $($variant,)*
         }
         impl F1 {
+            /// Resolve to a function pointer.
+            ///
+            /// # Examples
+            /// ```
+            /// # use hypervox_expr::F1;
+            /// let f = F1::Sin.to_fn();
+            /// assert!((f(1.0) - 1.0_f64.sin()).abs() < 1e-15);
+            /// ```
             #[inline]
             pub fn to_fn(self) -> fn(f64) -> f64 {
                 match self {
                     $(Self::$variant => $body,)*
                 }
             }
+            /// All function names for display.
             pub const NAMES: &'static [&'static str] = &[$($str,)*];
         }
         impl FromStr for F1 {
@@ -195,17 +228,27 @@ macro_rules! define_f1 {
 
 macro_rules! define_f2 {
     ($($variant:ident => $str:literal = $body:expr),* $(,)?) => {
+        /// Two-argument math functions (atan2, pow).
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum F2 {
             $($variant,)*
         }
         impl F2 {
+            /// Resolve to a function pointer.
+            ///
+            /// # Examples
+            /// ```
+            /// # use hypervox_expr::F2;
+            /// let atan2 = F2::Atan2.to_fn();
+            /// assert_eq!(atan2(0.0, 1.0), 0.0);
+            /// ```
             #[inline]
             pub fn to_fn(self) -> fn(f64, f64) -> f64 {
                 match self {
                     $(Self::$variant => $body,)*
                 }
             }
+            /// All function names for display.
             pub const NAMES: &'static [&'static str] = &[$($str,)*];
         }
         impl FromStr for F2 {
@@ -264,30 +307,80 @@ define_f2! {
     },
 }
 
+/// Return a comma-separated list of available constant names.
+///
+/// # Examples
+/// ```
+/// # use hypervox_expr::f0_list;
+/// let list = f0_list();
+/// assert!(list.contains("PI"));
+/// ```
 pub fn f0_list() -> String {
     F0::NAMES.join(", ")
 }
 
+/// Return a comma-separated list of available single-argument function names.
+///
+/// # Examples
+/// ```
+/// # use hypervox_expr::f1_list;
+/// let list = f1_list();
+/// assert!(list.contains("sin"));
+/// ```
 pub fn f1_list() -> String {
     F1::NAMES.join(", ")
 }
 
+/// Return a comma-separated list of available two-argument function names.
+///
+/// # Examples
+/// ```
+/// # use hypervox_expr::f2_list;
+/// let list = f2_list();
+/// assert!(list.contains("atan2"));
+/// ```
 pub fn f2_list() -> String {
     F2::NAMES.join(", ")
 }
 
+/// A group of dimension-invariant sub-expressions at a given nesting level.
 pub struct InvariantGroup {
+    /// Nesting level: higher = more invariant (evaluated sooner).
     pub level: usize,
+    /// Combined closure populating CSE slots for all invariants at this level.
     pub combined: CompiledExpr,
 }
 
+/// Multi-level compiled expression with invariant groups and main expression.
 pub struct CompiledExprMulti {
+    /// Invariant groups.
     pub groups: Vec<InvariantGroup>,
+    /// Main expression after extracting all invariants.
     pub main: CompiledExpr,
+    /// Total number of CSE slots required.
     pub cse_slots: usize,
 }
 
 impl Node {
+    /// Evaluate constant sub-expressions and apply algebraic simplifications at compile time.
+    ///
+    /// When `vars[i]` is `Some(v)`, variable `i` is replaced with `v` before folding.
+    ///
+    /// Simplifications include:
+    /// identity elimination (`x+0`, `x*1`, `x^1`),
+    /// zero propagation (`x*0`),
+    /// negation rewrites (`-(-x)` -> `x`, `x/-1` -> `-x`),
+    /// inverse composition (`ln(exp(x))` -> `x`),
+    /// constant reassociation,
+    /// and `x-x` -> `0`, `x/x` -> `1`, `x+x` -> `2*x`.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::Node;
+    /// let mut node = Node::Add(Box::new(Node::Num(2.0)), Box::new(Node::Num(3.0)));
+    /// node.pre_eval(&[]);
+    /// assert_eq!(node, Node::Num(5.0));
+    /// ```
     pub fn pre_eval(&mut self, vars: &[Option<f64>]) {
         match self {
             Node::Num(_) => {}
@@ -593,6 +686,14 @@ impl Node {
         }
     }
 
+    /// Return the number of CSE slots required (max slot index + 1).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::Node;
+    /// let node = Node::Let(0, Box::new(Node::Num(1.0)), Box::new(Node::Var(0)));
+    /// assert_eq!(node.cse_slots(), 1);
+    /// ```
     pub fn cse_slots(&self) -> usize {
         match self {
             Node::Let(slot, expr, body) => {
@@ -613,6 +714,23 @@ impl Node {
         }
     }
 
+    /// Apply common-subexpression elimination to the AST in-place.
+    ///
+    /// Repeated subtrees are extracted into `Let` bindings and evaluated once.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::Node;
+    /// let mut node = Node::Mul(
+    ///     Box::new(Node::Add(Box::new(Node::Var(0)), Box::new(Node::Num(1.0)))),
+    ///     Box::new(Node::Add(Box::new(Node::Var(0)), Box::new(Node::Num(1.0)))),
+    /// );
+    /// node.cse();
+    /// assert!(node.cse_slots() > 0); // (x+1) extracted into a CSE slot
+    /// let mut cache = vec![0.0; node.cse_slots()];
+    /// let f = node.compile();
+    /// assert_eq!(f(&[4.0], &mut cache), 25.0); // (4+1)^2
+    /// ```
     pub fn cse(&mut self) {
         let mut slot = 0usize;
         while self.cse_one_pass(slot) {
@@ -622,6 +740,21 @@ impl Node {
 
     /// Preparation pipeline: pre_eval, CSE, compile.
     /// Returns (compiled_expr, cse_slots).
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::{parse, VarMap};
+    /// # struct V;
+    /// # impl VarMap for V {
+    /// #     fn ndim(&self) -> usize { 3 }
+    /// #     fn resolve_alias(&self, name: &str) -> Option<usize> { match name { "x" => Some(0), "y" => Some(1), "z" => Some(2), _ => None } }
+    /// #     fn primary_prefix(&self) -> &str { "x" }
+    /// # }
+    /// let mut node = parse("x*x + x*x", &V).unwrap();
+    /// let (f, slots) = node.prepare(&[]);
+    /// let mut cache = vec![0.0; slots];
+    /// assert_eq!(f(&[3.0], &mut cache), 18.0);
+    /// ```
     pub fn prepare(&mut self, vars: &[Option<f64>]) -> (CompiledExpr, usize) {
         self.pre_eval(vars);
         self.cse();
@@ -630,6 +763,24 @@ impl Node {
 
     /// Preparation pipeline: pre_eval, CSE, compile_multi.
     /// Returns compiled_expr_multi.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::{parse, VarMap};
+    /// # struct V;
+    /// # impl VarMap for V {
+    /// #     fn ndim(&self) -> usize { 3 }
+    /// #     fn resolve_alias(&self, name: &str) -> Option<usize> { match name { "x" => Some(0), "y" => Some(1), "z" => Some(2), _ => None } }
+    /// #     fn primary_prefix(&self) -> &str { "x" }
+    /// # }
+    /// let mut node = parse("x*y + z", &V).unwrap();
+    /// let multi = node.prepare_multi(&[], &[0, 1, 2]);
+    /// let mut cache = vec![0.0; multi.cse_slots];
+    /// for g in &multi.groups {
+    ///     (g.combined)(&[1.0, 2.0, 3.0], &mut cache);
+    /// }
+    /// assert_eq!((multi.main)(&[1.0, 2.0, 3.0], &mut cache), 5.0);
+    /// ```
     pub fn prepare_multi(
         &mut self,
         vars: &[Option<f64>],
@@ -735,6 +886,17 @@ impl Node {
         }
     }
 
+    /// Return the set of variable indices this node depends on.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::Node;
+    /// let node = Node::Add(Box::new(Node::Var(0)), Box::new(Node::Var(2)));
+    /// let deps = node.depends_on();
+    /// assert!(deps.contains(0));
+    /// assert!(!deps.contains(1));
+    /// assert!(deps.contains(2));
+    /// ```
     pub fn depends_on(&self) -> IndexSet {
         match self {
             Node::Num(_) => IndexSet::default(),
@@ -752,6 +914,15 @@ impl Node {
         }
     }
 
+    /// Compile the AST into a closure for repeated evaluation.
+    ///
+    /// # Examples
+    /// ```
+    /// # use hypervox_expr::Node;
+    /// let node = Node::Add(Box::new(Node::Num(3.0)), Box::new(Node::Num(4.0)));
+    /// let f = node.compile();
+    /// assert_eq!(f(&[], &mut []), 7.0);
+    /// ```
     pub fn compile(&self) -> CompiledExpr {
         match self {
             Node::Num(v) => {
@@ -874,6 +1045,10 @@ impl Node {
         }
     }
 
+    /// Extract invariant sub-expressions into pre-computed closures.
+    ///
+    /// `invariant_mask` indicates which variables are invariant at the
+    /// current nesting level. Returns `None` if no invariants found.
     pub fn compile_invariants_combined(
         &mut self,
         invariant_mask: &IndexSet,
@@ -1005,6 +1180,7 @@ impl Node {
         }
     }
 
+    /// Compile with multi-level invariant extraction for spatial dimensions.
     pub fn compile_multi(&mut self, spatial_dims: &[usize]) -> CompiledExprMulti {
         if spatial_dims.is_empty() {
             let main = self.compile();
@@ -1519,11 +1695,40 @@ fn resolve_ident<V: VarMap>(name: &str, col: usize, vars: &V) -> Result<Node, Er
 }
 
 /// Parse an expression string into a `Node` AST.
+///
+/// # Examples
+/// ```
+/// # use hypervox_expr::{parse, VarMap};
+/// # struct V;
+/// # impl VarMap for V {
+/// #     fn ndim(&self) -> usize { 3 }
+/// #     fn resolve_alias(&self, name: &str) -> Option<usize> { match name { "x" => Some(0), "y" => Some(1), "z" => Some(2), _ => None } }
+/// #     fn primary_prefix(&self) -> &str { "x" }
+/// # }
+/// let node = parse("x * x + y", &V).unwrap();
+/// let mut cache = vec![0.0; node.cse_slots()];
+/// let result = node.compile()(&[3.0, 4.0], &mut cache);
+/// assert_eq!(result, 13.0);
+/// ```
 pub fn parse<V: VarMap>(expr_str: &str, vars: &V) -> Result<Node, Error> {
     let parser = Parser::new(expr_str, vars)?;
     parser.parse()
 }
 
+/// Validate an expression string without producing a compiled result.
+///
+/// # Examples
+/// ```
+/// # use hypervox_expr::{validate, VarMap};
+/// # struct V;
+/// # impl VarMap for V {
+/// #     fn ndim(&self) -> usize { 3 }
+/// #     fn resolve_alias(&self, name: &str) -> Option<usize> { match name { "x" => Some(0), "y" => Some(1), "z" => Some(2), _ => None } }
+/// #     fn primary_prefix(&self) -> &str { "x" }
+/// # }
+/// assert!(validate("x + y", &V).is_ok());
+/// assert!(validate("x +", &V).is_err());
+/// ```
 pub fn validate(expr_str: &str, vars: &impl VarMap) -> Result<(), Error> {
     let trimmed = expr_str.trim();
     if trimmed.is_empty() {
