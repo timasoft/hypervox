@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "High-performance mathematical expression parser, AST optimizer (constant folding, CSE), and closure compiler with multi-dimensional invariant hoisting"
 authors = ["timasoft <tima.klester@yandex.ru>"]
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/timasoft/hypervox"
+homepage = "https://github.com/timasoft/hypervox/tree/main/expr"
+documentation = "https://docs.rs/hypervox_expr"
 keywords = ["math", "expression", "parser", "compiler", "cse"]
 categories = ["mathematics", "parsing", "algorithms"]
 
