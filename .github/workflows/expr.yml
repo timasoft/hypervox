@@ -63,7 +63,7 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Run cargo clippy
-        run: nix develop . --command "cargo clippy -p hypervox_expr -- -Dwarnings && cargo clippy -p hypervox_expr --release -- -Dwarnings"
+        run: nix develop . --command "cargo clippy -p hypervox_expr --all-targets --all-features -- -Dwarnings && cargo clippy -p hypervox_expr --release --all-targets --all-features -- -Dwarnings"
 
       - name: Check benchmarks compile
         run: nix develop . --command cargo bench -p hypervox_expr --no-run --verbose

@@ -65,7 +65,7 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Run cargo clippy
-        run: nix develop . --command "cargo clippy -- -Dwarnings && cargo clippy --release -- -Dwarnings"
+        run: nix develop . --command "cargo clippy --all-targets --all-features -- -Dwarnings && cargo clippy --release --all-targets --all-features -- -Dwarnings"
 
       - name: Run cargo fmt
         run: nix develop . --command cargo fmt --all --check
