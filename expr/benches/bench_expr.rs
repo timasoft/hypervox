@@ -219,7 +219,10 @@ fn bench_compile_time(c: &mut Criterion, name: &str, expr_src: &str) {
     group.bench_function("pre_eval", |b| {
         b.iter_batched(
             || parse(expr_src, &D3).unwrap(),
-            |mut node| black_box(node.pre_eval(&[])),
+            |mut node| {
+                node.pre_eval(&[]);
+                black_box(node)
+            },
             criterion::BatchSize::SmallInput,
         );
     });
@@ -231,7 +234,10 @@ fn bench_compile_time(c: &mut Criterion, name: &str, expr_src: &str) {
                 node.pre_eval(&[]);
                 node
             },
-            |mut node| black_box(node.cse()),
+            |mut node| {
+                node.cse();
+                black_box(node)
+            },
             criterion::BatchSize::SmallInput,
         );
     });
