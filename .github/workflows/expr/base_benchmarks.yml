@@ -1,0 +1,41 @@
+name: Base Branch Benchmark
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - 'expr/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+    workflow_dispatch:
+
+jobs:
+  benchmark_base_branch:
+    permissions:
+      checks: write
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: bencherdev/bencher@v0.6
+
+      - name: Track base branch benchmarks with Bencher
+        run: |
+          bencher run \
+          --project hypervox-expr \
+          --key '${{ secrets.BENCHER_API_KEY }}' \
+          --branch main \
+          --testbed ubuntu-latest \
+          --adapter rust_criterion \
+          --error-on-alert \
+          --github-actions '${{ secrets.GITHUB_TOKEN }}' \
+          nix develop . --command \
+            cargo bench -p hypervox_expr --features slow-benches

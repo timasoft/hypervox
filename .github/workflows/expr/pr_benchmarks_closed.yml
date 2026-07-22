@@ -1,0 +1,29 @@
+name: Archive Closed Pull Request Benchmark Branch
+
+on:
+  pull_request:
+    types: [closed]
+    paths:
+      - 'expr/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+    workflow_dispatch:
+
+jobs:
+  archive_pr_branch:
+    name: Archive closed PR branch with Bencher
+
+    # DO NOT REMOVE: For handling Fork PRs see Pull Requests from Forks
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: bencherdev/bencher@v0.6
+      - name: Archive closed PR branch with Bencher
+        run: |
+          bencher archive \
+          --project hypervox-expr \
+          --key '${{ secrets.BENCHER_API_KEY }}' \
+          --branch "$GITHUB_HEAD_REF"
