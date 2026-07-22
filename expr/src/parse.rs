@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::errors::{Error, LexerErrorKind, ParseErrorKind};
 use crate::node::Node;
-use crate::{F0, F1, F2, LexerToken as Token, VarMap};
+use crate::{ExtF0, ExtF1, ExtF2, F0, F1, F2, LexerToken as Token, NoExtF, VarMap};
 
 struct Lexer {
     chars: Vec<char>,
@@ -193,26 +193,36 @@ impl<'a, V: VarMap> Parser<'a, V> {
         }
     }
 
-    fn parse(mut self) -> Result<Node, Error> {
+    fn parse<EF0, EF1, EF2>(mut self) -> Result<Node<EF1, EF2>, Error>
+    where
+        EF0: ExtF0 + FromStr,
+        EF1: ExtF1 + FromStr,
+        EF2: ExtF2 + FromStr,
+    {
         if matches!(self.current, Token::Eof) {
             return Err(Error::Parser {
                 col: 0,
                 kind: ParseErrorKind::EmptyExpression,
             });
         }
-        let node = self.parse_expr()?;
+        let node = self.parse_expr::<EF0, EF1, EF2>()?;
         if !matches!(self.current, Token::Eof) {
             return Err(self.err_at(ParseErrorKind::TrailingToken(self.current.clone())));
         }
         Ok(node)
     }
 
-    fn parse_expr(&mut self) -> Result<Node, Error> {
-        let mut left = self.parse_term()?;
+    fn parse_expr<EF0, EF1, EF2>(&mut self) -> Result<Node<EF1, EF2>, Error>
+    where
+        EF0: ExtF0 + FromStr,
+        EF1: ExtF1 + FromStr,
+        EF2: ExtF2 + FromStr,
+    {
+        let mut left = self.parse_term::<EF0, EF1, EF2>()?;
         while matches!(self.current, Token::Plus | Token::Minus) {
             let op = std::mem::replace(&mut self.current, Token::Eof);
             self.advance()?;
-            let right = self.parse_term()?;
+            let right = self.parse_term::<EF0, EF1, EF2>()?;
             left = match op {
                 Token::Plus => Node::Add(Box::new(left), Box::new(right)),
                 Token::Minus => Node::Sub(Box::new(left), Box::new(right)),
@@ -222,12 +232,17 @@ impl<'a, V: VarMap> Parser<'a, V> {
         Ok(left)
     }
 
-    fn parse_term(&mut self) -> Result<Node, Error> {
-        let mut left = self.parse_unary()?;
+    fn parse_term<EF0, EF1, EF2>(&mut self) -> Result<Node<EF1, EF2>, Error>
+    where
+        EF0: ExtF0 + FromStr,
+        EF1: ExtF1 + FromStr,
+        EF2: ExtF2 + FromStr,
+    {
+        let mut left = self.parse_unary::<EF0, EF1, EF2>()?;
         while matches!(self.current, Token::Star | Token::Slash | Token::Percent) {
             let op = std::mem::replace(&mut self.current, Token::Eof);
             self.advance()?;
-            let right = self.parse_unary()?;
+            let right = self.parse_unary::<EF0, EF1, EF2>()?;
             left = match op {
                 Token::Star => Node::Mul(Box::new(left), Box::new(right)),
                 Token::Slash => Node::Div(Box::new(left), Box::new(right)),
@@ -238,32 +253,47 @@ impl<'a, V: VarMap> Parser<'a, V> {
         Ok(left)
     }
 
-    fn parse_unary(&mut self) -> Result<Node, Error> {
+    fn parse_unary<EF0, EF1, EF2>(&mut self) -> Result<Node<EF1, EF2>, Error>
+    where
+        EF0: ExtF0 + FromStr,
+        EF1: ExtF1 + FromStr,
+        EF2: ExtF2 + FromStr,
+    {
         if matches!(self.current, Token::Minus) {
             self.advance()?;
-            let node = self.parse_unary()?;
+            let node = self.parse_unary::<EF0, EF1, EF2>()?;
             Ok(Node::Neg(Box::new(node)))
         } else if matches!(self.current, Token::Plus) {
             self.advance()?;
-            self.parse_unary()
+            self.parse_unary::<EF0, EF1, EF2>()
         } else {
-            self.parse_power()
+            self.parse_power::<EF0, EF1, EF2>()
         }
     }
 
     /// right-associative: a^b^c = a^(b^c)
-    fn parse_power(&mut self) -> Result<Node, Error> {
-        let left = self.parse_primary()?;
+    fn parse_power<EF0, EF1, EF2>(&mut self) -> Result<Node<EF1, EF2>, Error>
+    where
+        EF0: ExtF0 + FromStr,
+        EF1: ExtF1 + FromStr,
+        EF2: ExtF2 + FromStr,
+    {
+        let left = self.parse_primary::<EF0, EF1, EF2>()?;
         if matches!(self.current, Token::Caret) {
             self.advance()?;
-            let right = self.parse_power()?;
+            let right = self.parse_power::<EF0, EF1, EF2>()?;
             Ok(Node::Pow(Box::new(left), Box::new(right)))
         } else {
             Ok(left)
         }
     }
 
-    fn parse_primary(&mut self) -> Result<Node, Error> {
+    fn parse_primary<EF0, EF1, EF2>(&mut self) -> Result<Node<EF1, EF2>, Error>
+    where
+        EF0: ExtF0 + FromStr,
+        EF1: ExtF1 + FromStr,
+        EF2: ExtF2 + FromStr,
+    {
         match &self.current {
             Token::Num(v) => {
                 let val = *v;
@@ -274,14 +304,18 @@ impl<'a, V: VarMap> Parser<'a, V> {
                 let name = name.clone();
                 self.advance()?;
                 if matches!(self.current, Token::LParen) {
-                    self.parse_function_call(&name)
+                    self.parse_function_call::<EF0, EF1, EF2>(&name)
                 } else {
-                    Ok(resolve_ident(&name, self.current_pos + 1, self.vars)?)
+                    Ok(resolve_ident::<V, EF0, EF1, EF2>(
+                        &name,
+                        self.current_pos + 1,
+                        self.vars,
+                    )?)
                 }
             }
             Token::LParen => {
                 self.advance()?;
-                let node = self.parse_expr()?;
+                let node = self.parse_expr::<EF0, EF1, EF2>()?;
                 if !matches!(self.current, Token::RParen) {
                     return Err(self.err_at(ParseErrorKind::ExpectedRParen(self.current.clone())));
                 }
@@ -290,7 +324,7 @@ impl<'a, V: VarMap> Parser<'a, V> {
             }
             Token::Pipe => {
                 self.advance()?;
-                let node = self.parse_expr()?;
+                let node = self.parse_expr::<EF0, EF1, EF2>()?;
                 if !matches!(self.current, Token::Pipe) {
                     return Err(self.err_at(ParseErrorKind::ExpectedPipe(self.current.clone())));
                 }
@@ -301,7 +335,12 @@ impl<'a, V: VarMap> Parser<'a, V> {
         }
     }
 
-    fn parse_function_call(&mut self, name: &str) -> Result<Node, Error> {
+    fn parse_function_call<EF0, EF1, EF2>(&mut self, name: &str) -> Result<Node<EF1, EF2>, Error>
+    where
+        EF0: ExtF0 + FromStr,
+        EF1: ExtF1 + FromStr,
+        EF2: ExtF2 + FromStr,
+    {
         debug_assert!(matches!(self.current, Token::LParen));
         self.advance()?;
 
@@ -310,13 +349,16 @@ impl<'a, V: VarMap> Parser<'a, V> {
             return match F0::from_str(name) {
                 Ok(f) => Ok(Node::Num(f.to_num())),
                 Err(_) => {
-                    let kind = if F1::from_str(name).is_ok() {
+                    if let Ok(f) = EF0::from_str(name) {
+                        return Ok(Node::Num(f.to_num()));
+                    }
+                    let kind = if F1::from_str(name).is_ok() || EF1::from_str(name).is_ok() {
                         ParseErrorKind::FunctionArgCount {
                             name: name.to_string(),
                             expected: 1,
                             found: 0,
                         }
-                    } else if F2::from_str(name).is_ok() {
+                    } else if F2::from_str(name).is_ok() || EF2::from_str(name).is_ok() {
                         ParseErrorKind::FunctionArgCount {
                             name: name.to_string(),
                             expected: 2,
@@ -330,11 +372,11 @@ impl<'a, V: VarMap> Parser<'a, V> {
             };
         }
 
-        let arg1 = self.parse_expr()?;
+        let arg1 = self.parse_expr::<EF0, EF1, EF2>()?;
 
         if matches!(self.current, Token::Comma) {
             self.advance()?;
-            let arg2 = self.parse_expr()?;
+            let arg2 = self.parse_expr::<EF0, EF1, EF2>()?;
             if !matches!(self.current, Token::RParen) {
                 return Err(self.err_at(ParseErrorKind::ExpectedRParen(self.current.clone())));
             }
@@ -343,13 +385,16 @@ impl<'a, V: VarMap> Parser<'a, V> {
             match F2::from_str(name) {
                 Ok(f) => Ok(Node::F2(f, Box::new(arg1), Box::new(arg2))),
                 Err(_) => {
-                    let kind = if F1::from_str(name).is_ok() {
+                    if let Ok(f) = EF2::from_str(name) {
+                        return Ok(Node::ExtF2(f, Box::new(arg1), Box::new(arg2)));
+                    }
+                    let kind = if F1::from_str(name).is_ok() || EF1::from_str(name).is_ok() {
                         ParseErrorKind::FunctionArgCount {
                             name: name.to_string(),
                             expected: 1,
                             found: 2,
                         }
-                    } else if F0::from_str(name).is_ok() {
+                    } else if F0::from_str(name).is_ok() || EF0::from_str(name).is_ok() {
                         ParseErrorKind::FunctionArgCount {
                             name: name.to_string(),
                             expected: 0,
@@ -372,13 +417,16 @@ impl<'a, V: VarMap> Parser<'a, V> {
             match F1::from_str(name) {
                 Ok(f) => Ok(Node::F1(f, Box::new(arg1))),
                 Err(_) => {
-                    let kind = if F0::from_str(name).is_ok() {
+                    if let Ok(f) = EF1::from_str(name) {
+                        return Ok(Node::ExtF1(f, Box::new(arg1)));
+                    }
+                    let kind = if F0::from_str(name).is_ok() || EF0::from_str(name).is_ok() {
                         ParseErrorKind::FunctionArgCount {
                             name: name.to_string(),
                             expected: 0,
                             found: 1,
                         }
-                    } else if F2::from_str(name).is_ok() {
+                    } else if F2::from_str(name).is_ok() || EF2::from_str(name).is_ok() {
                         ParseErrorKind::FunctionArgCount {
                             name: name.to_string(),
                             expected: 2,
@@ -394,10 +442,23 @@ impl<'a, V: VarMap> Parser<'a, V> {
     }
 }
 
-fn resolve_ident<V: VarMap>(name: &str, col: usize, vars: &V) -> Result<Node, Error> {
+fn resolve_ident<V: VarMap, EF0, EF1, EF2>(
+    name: &str,
+    col: usize,
+    vars: &V,
+) -> Result<Node<EF1, EF2>, Error>
+where
+    EF0: ExtF0 + FromStr,
+    EF1: ExtF1,
+    EF2: ExtF2,
+{
     if let Ok(f) = F0::from_str(name) {
         return Ok(Node::Num(f.to_num()));
     };
+
+    if let Ok(f) = EF0::from_str(name) {
+        return Ok(Node::Num(f.to_num()));
+    }
 
     if let Some(idx) = vars.resolve_alias(name) {
         return Ok(Node::Var(idx));
@@ -443,8 +504,7 @@ fn resolve_ident<V: VarMap>(name: &str, col: usize, vars: &V) -> Result<Node, Er
 /// assert_eq!(result, 13.0);
 /// ```
 pub fn parse<V: VarMap>(expr_str: &str, vars: &V) -> Result<Node, Error> {
-    let parser = Parser::new(expr_str, vars)?;
-    parser.parse()
+    parse_with_ext::<V, NoExtF, NoExtF, NoExtF>(expr_str, vars)
 }
 
 /// Validate an expression string without producing a compiled result.
@@ -461,7 +521,64 @@ pub fn parse<V: VarMap>(expr_str: &str, vars: &V) -> Result<Node, Error> {
 /// assert!(validate("x + y", &V).is_ok());
 /// assert!(validate("x +", &V).is_err());
 /// ```
-pub fn validate(expr_str: &str, vars: &impl VarMap) -> Result<(), Error> {
+pub fn validate<V: VarMap>(expr_str: &str, vars: &V) -> Result<(), Error> {
+    validate_with_ext::<V, NoExtF, NoExtF, NoExtF>(expr_str, vars)
+}
+
+/// Parse an expression string into a `Node` AST, with support for custom extension functions.
+///
+/// # Examples
+/// ```
+/// # use hypervox_expr::{parse_with_ext, VarMap, NoExtF};
+/// # use hypervox_expr::define_ext_f0;
+/// # use hypervox_expr::define_ext_f1;
+/// # struct V;
+/// # impl VarMap for V {
+/// #     fn ndim(&self) -> usize { 3 }
+/// #     fn resolve_alias(&self, name: &str) -> Option<usize> { match name { "x" => Some(0), "y" => Some(1), "z" => Some(2), _ => None } }
+/// #     fn primary_prefix(&self) -> &str { "x" }
+/// # }
+/// define_ext_f0!(MyF0, Tau => "tau" = std::f64::consts::TAU);
+/// define_ext_f1!(MyF1, Cube => "cube" = |x| x * x * x);
+/// let node = parse_with_ext::<V, MyF0, MyF1, NoExtF>("tau + cube(y)", &V).unwrap();
+/// let mut cache = vec![0.0; node.cse_slots()];
+/// let result = node.compile()(&[0.0, 2.0, 0.0], &mut cache);
+/// assert!((result - (std::f64::consts::TAU + 8.0)).abs() < 1e-9);
+/// ```
+pub fn parse_with_ext<V, EF0, EF1, EF2>(expr_str: &str, vars: &V) -> Result<Node<EF1, EF2>, Error>
+where
+    V: VarMap,
+    EF0: ExtF0 + FromStr,
+    EF1: ExtF1 + FromStr,
+    EF2: ExtF2 + FromStr,
+{
+    let parser = Parser::new(expr_str, vars)?;
+    parser.parse::<EF0, EF1, EF2>()
+}
+
+/// Validate an expression string without producing a compiled result, with support for custom extension functions.
+///
+/// # Examples
+/// ```
+/// # use hypervox_expr::{validate_with_ext, VarMap, NoExtF};
+/// # use hypervox_expr::define_ext_f0;
+/// # struct V;
+/// # impl VarMap for V {
+/// #     fn ndim(&self) -> usize { 3 }
+/// #     fn resolve_alias(&self, name: &str) -> Option<usize> { match name { "x" => Some(0), "y" => Some(1), "z" => Some(2), _ => None } }
+/// #     fn primary_prefix(&self) -> &str { "x" }
+/// # }
+/// define_ext_f0!(MyF0, Tau => "tau" = std::f64::consts::TAU);
+/// assert!(validate_with_ext::<V, MyF0, NoExtF, NoExtF>("tau + x", &V).is_ok());
+/// assert!(validate_with_ext::<V, MyF0, NoExtF, NoExtF>("tau +", &V).is_err());
+/// ```
+pub fn validate_with_ext<V, EF0, EF1, EF2>(expr_str: &str, vars: &V) -> Result<(), Error>
+where
+    V: VarMap,
+    EF0: ExtF0 + FromStr,
+    EF1: ExtF1 + FromStr,
+    EF2: ExtF2 + FromStr,
+{
     let trimmed = expr_str.trim();
     if trimmed.is_empty() {
         return Err(Error::Parser {
@@ -469,5 +586,5 @@ pub fn validate(expr_str: &str, vars: &impl VarMap) -> Result<(), Error> {
             kind: ParseErrorKind::EmptyExpression,
         });
     }
-    parse(trimmed, vars).map(|_| ())
+    parse_with_ext::<V, EF0, EF1, EF2>(trimmed, vars).map(|_| ())
 }

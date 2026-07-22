@@ -7,7 +7,10 @@
 //! for fast repeated evaluation over N-dimensional grids.
 //! Variable names are resolved through the [`VarMap`] trait.
 
-use std::{fmt::Display, str::FromStr};
+use std::{
+    fmt::{Debug, Display},
+    str::FromStr,
+};
 
 mod errors;
 mod index_set;
@@ -17,7 +20,7 @@ mod parse;
 pub use errors::{ArithIndexSetTryFromError, Error, LexerErrorKind, ParseErrorKind};
 pub use index_set::{ArithIndexSet, ArithRangeFrom, ArithRangeIter, IndexSet, IndexSetIter};
 pub use node::{CompiledExpr, CompiledExprMulti, InvariantGroup, Node};
-pub use parse::{parse, validate};
+pub use parse::{parse, parse_with_ext, validate, validate_with_ext};
 
 /// Trait for resolving variable names in expressions.
 /// Implementors define variable aliases and the indexed-variable naming scheme.
@@ -220,6 +223,226 @@ pub fn f1_list() -> String {
 /// ```
 pub fn f2_list() -> String {
     F2::NAMES.join(", ")
+}
+
+/// Trait for custom constants.
+pub trait ExtF0: Debug + Clone + PartialEq {
+    /// Evaluate the constant as an f64.
+    fn to_num(&self) -> f64;
+
+    /// All constant names for display.
+    fn names(&self) -> &[&str];
+
+    /// List all constant names.
+    ///
+    /// The default implementation returns the elements of [`Self::names`] separated by commas.
+    fn list(&self) -> String {
+        self.names().join(", ")
+    }
+}
+
+/// Trait for custom single-argument functions.
+pub trait ExtF1: Debug + Clone + PartialEq {
+    /// Resolve to a function pointer.
+    fn to_fn(&self) -> fn(f64) -> f64;
+
+    /// All function names for display.
+    fn names(&self) -> &[&str];
+
+    /// List all function names.
+    ///
+    /// The default implementation returns the elements of [`Self::names`] separated by commas.
+    fn list(&self) -> String {
+        self.names().join(", ")
+    }
+}
+
+/// Trait for custom two-argument functions.
+pub trait ExtF2: Debug + Clone + PartialEq {
+    /// Resolve to a function pointer.
+    fn to_fn(&self) -> fn(f64, f64) -> f64;
+
+    /// All function names for display.
+    fn names(&self) -> &[&str];
+
+    /// List all function names.
+    ///
+    /// The default implementation returns the elements of [`Self::names`] separated by commas.
+    fn list(&self) -> String {
+        self.names().join(", ")
+    }
+}
+
+/// Define a custom-constants enum implementing [`ExtF0`] and [`FromStr`].
+///
+/// # Examples
+/// ```
+/// use hypervox_expr::ExtF0;
+/// hypervox_expr::define_ext_f0!(MyF0, MyConst => "my_const" = 42.0);
+/// assert_eq!(MyF0::MyConst.to_num(), 42.0);
+/// ```
+#[macro_export]
+macro_rules! define_ext_f0 {
+    ($enum_name:ident) => {
+        define_ext_f0!($enum_name,);
+    };
+    ($enum_name:ident, $($variant:ident => $str:literal = $body:expr),* $(,)?) => {
+        /// Constants.
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        pub enum $enum_name {
+            $($variant,)*
+        }
+        impl hypervox_expr::ExtF0 for $enum_name {
+            /// Evaluate the constant as an f64.
+            fn to_num(&self) -> f64 {
+                match *self {
+                    $(Self::$variant => $body,)*
+                }
+            }
+            /// All constant names for display.
+            fn names(&self) -> &[&str] {
+                &[$($str,)*]
+            }
+        }
+        impl std::str::FromStr for $enum_name {
+            type Err = String;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($str => Ok(Self::$variant),)*
+                    _ => Err(format!("unknown const '{s}'")),
+                }
+            }
+        }
+    };
+}
+
+/// Define custom single-argument functions implementing [`ExtF1`] and [`FromStr`].
+///
+/// # Examples
+/// ```
+/// use hypervox_expr::ExtF1;
+/// hypervox_expr::define_ext_f1!(MyF1, Cube => "cube" = |x| x * x * x);
+/// assert_eq!(MyF1::Cube.to_fn()(3.0), 27.0);
+/// ```
+#[macro_export]
+macro_rules! define_ext_f1 {
+    ($enum_name:ident) => {
+        define_ext_f1!($enum_name,);
+    };
+    ($enum_name:ident, $($variant:ident => $str:literal = $body:expr),* $(,)?) => {
+        /// Single-argument math functions.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum $enum_name {
+            $($variant,)*
+        }
+        impl hypervox_expr::ExtF1 for $enum_name {
+            /// Resolve to a function pointer.
+            #[inline]
+            fn to_fn(&self) -> fn(f64) -> f64 {
+                match *self {
+                    $(Self::$variant => $body,)*
+                }
+            }
+            /// All function names for display.
+            fn names(&self) -> &[&str] {
+                &[$($str,)*]
+            }
+        }
+        impl std::str::FromStr for $enum_name {
+            type Err = String;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($str => Ok(Self::$variant),)*
+                    _ => Err(format!("unknown function '{s}'")),
+                }
+            }
+        }
+    };
+}
+
+/// Define custom two-argument functions implementing [`ExtF2`] and [`FromStr`].
+///
+/// # Examples
+/// ```
+/// use hypervox_expr::ExtF2;
+/// hypervox_expr::define_ext_f2!(MyF2, Hypot => "hypot" = |x, y| x.hypot(y));
+/// assert_eq!(MyF2::Hypot.to_fn()(3.0, 4.0), 5.0);
+/// ```
+#[macro_export]
+macro_rules! define_ext_f2 {
+    ($enum_name:ident) => {
+        define_ext_f2!($enum_name,);
+    };
+    ($enum_name:ident, $($variant:ident => $str:literal = $body:expr),* $(,)?) => {
+        /// Two-argument math functions (atan2, pow).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum $enum_name {
+            $($variant,)*
+        }
+        impl hypervox_expr::ExtF2 for $enum_name {
+            /// Resolve to a function pointer.
+            #[inline]
+            fn to_fn(&self) -> fn(f64, f64) -> f64 {
+                match *self {
+                    $(Self::$variant => $body,)*
+                }
+            }
+            /// All function names for display.
+            fn names(&self) -> &[&str] {
+                &[$($str,)*]
+            }
+        }
+        impl std::str::FromStr for $enum_name {
+            type Err = String;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($str => Ok(Self::$variant),)*
+                    _ => Err(format!("unknown function '{s}'")),
+                }
+            }
+        }
+    };
+}
+
+/// Zero-variant placeholder type for when no external functions/constants are used.
+///
+/// Acts as the default type parameter for [`Node`], [`parse`], and [`validate`]
+/// so that the regular API requires no generics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NoExtF {}
+
+impl ExtF0 for NoExtF {
+    fn to_num(&self) -> f64 {
+        unreachable!("NoExtF should never be called")
+    }
+    fn names(&self) -> &[&str] {
+        unreachable!("NoExtF should never be called")
+    }
+}
+
+impl ExtF1 for NoExtF {
+    fn to_fn(&self) -> fn(f64) -> f64 {
+        unreachable!("NoExtF should never be called")
+    }
+    fn names(&self) -> &[&str] {
+        unreachable!("NoExtF should never be called")
+    }
+}
+
+impl ExtF2 for NoExtF {
+    fn to_fn(&self) -> fn(f64, f64) -> f64 {
+        unreachable!("NoExtF should never be called")
+    }
+    fn names(&self) -> &[&str] {
+        unreachable!("NoExtF should never be called")
+    }
+}
+
+impl FromStr for NoExtF {
+    type Err = String;
+    fn from_str(_s: &str) -> Result<Self, Self::Err> {
+        Err(String::from("no external constants or functions defined"))
+    }
 }
 
 /// Token produced by the lexer and consumed by the Pratt parser.

@@ -1,25 +1,29 @@
 use crate::index_set::{ArithIndexSet, IndexSet};
-use crate::{F1, F2};
+use crate::{ExtF1, ExtF2, F1, F2, NoExtF};
 
 /// A compiled expression closure: `(vars, cse_cache) -> result`.
 pub type CompiledExpr = Box<dyn Fn(&[f64], &mut [f64]) -> f64 + Send + Sync>;
 
 /// AST node representing a mathematical expression.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Node {
+pub enum Node<EF1: ExtF1 = NoExtF, EF2: ExtF2 = NoExtF> {
     Num(f64),
     Var(usize),
-    Neg(Box<Node>),
-    Add(Box<Node>, Box<Node>),
-    Sub(Box<Node>, Box<Node>),
-    Mul(Box<Node>, Box<Node>),
-    Div(Box<Node>, Box<Node>),
-    Pow(Box<Node>, Box<Node>),
-    Mod(Box<Node>, Box<Node>),
-    F1(F1, Box<Node>),
-    F2(F2, Box<Node>, Box<Node>),
+    Neg(Box<Node<EF1, EF2>>),
+    Add(Box<Node<EF1, EF2>>, Box<Node<EF1, EF2>>),
+    Sub(Box<Node<EF1, EF2>>, Box<Node<EF1, EF2>>),
+    Mul(Box<Node<EF1, EF2>>, Box<Node<EF1, EF2>>),
+    Div(Box<Node<EF1, EF2>>, Box<Node<EF1, EF2>>),
+    Pow(Box<Node<EF1, EF2>>, Box<Node<EF1, EF2>>),
+    Mod(Box<Node<EF1, EF2>>, Box<Node<EF1, EF2>>),
+    F1(F1, Box<Node<EF1, EF2>>),
+    F2(F2, Box<Node<EF1, EF2>>, Box<Node<EF1, EF2>>),
+    /// External single-argument function call.
+    ExtF1(EF1, Box<Node<EF1, EF2>>),
+    /// External two-argument function call.
+    ExtF2(EF2, Box<Node<EF1, EF2>>, Box<Node<EF1, EF2>>),
     /// let slot_i = expr in body
-    Let(usize, Box<Node>, Box<Node>),
+    Let(usize, Box<Node<EF1, EF2>>, Box<Node<EF1, EF2>>),
     /// reference to cached CSE slot
     CseRef(usize, IndexSet),
 }
@@ -42,7 +46,7 @@ pub struct CompiledExprMulti {
     pub cse_slots: usize,
 }
 
-impl Node {
+impl<EF1: ExtF1, EF2: ExtF2> Node<EF1, EF2> {
     /// Evaluate constant sub-expressions and apply algebraic simplifications at compile time.
     ///
     /// When `vars[i]` is `Some(v)`, variable `i` is replaced with `v` before folding.
@@ -58,7 +62,7 @@ impl Node {
     /// # Examples
     /// ```
     /// # use hypervox_expr::Node;
-    /// let mut node = Node::Add(Box::new(Node::Num(2.0)), Box::new(Node::Num(3.0)));
+    /// let mut node: Node = Node::Add(Box::new(Node::Num(2.0)), Box::new(Node::Num(3.0)));
     /// node.pre_eval(&[]);
     /// assert_eq!(node, Node::Num(5.0));
     /// ```
@@ -359,6 +363,19 @@ impl Node {
                     *self = Node::Num(f.to_fn()(*x, *y));
                 }
             }
+            Node::ExtF1(f, a) => {
+                a.pre_eval(vars);
+                if let Node::Num(x) = a.as_ref() {
+                    *self = Node::Num(f.to_fn()(*x));
+                }
+            }
+            Node::ExtF2(f, a, b) => {
+                a.pre_eval(vars);
+                b.pre_eval(vars);
+                if let (Node::Num(x), Node::Num(y)) = (a.as_ref(), b.as_ref()) {
+                    *self = Node::Num(f.to_fn()(*x, *y));
+                }
+            }
             Node::Let(_slot, expr, body) => {
                 expr.pre_eval(vars);
                 body.pre_eval(vars);
@@ -372,7 +389,7 @@ impl Node {
     /// # Examples
     /// ```
     /// # use hypervox_expr::Node;
-    /// let node = Node::Let(0, Box::new(Node::Num(1.0)), Box::new(Node::Var(0)));
+    /// let node: Node = Node::Let(0, Box::new(Node::Num(1.0)), Box::new(Node::Var(0)));
     /// assert_eq!(node.cse_slots(), 1);
     /// ```
     pub fn cse_slots(&self) -> usize {
@@ -382,15 +399,15 @@ impl Node {
                 slot.max(expr.cse_slots()).max(body.cse_slots())
             }
             Node::CseRef(slot, _) => *slot + 1,
-            Node::Neg(a) => a.cse_slots(),
+            Node::Neg(a) | Node::F1(_, a) | Node::ExtF1(_, a) => a.cse_slots(),
             Node::Add(a, b)
             | Node::Sub(a, b)
             | Node::Mul(a, b)
             | Node::Div(a, b)
             | Node::Pow(a, b)
             | Node::Mod(a, b)
-            | Node::F2(_, a, b) => a.cse_slots().max(b.cse_slots()),
-            Node::F1(_, a) => a.cse_slots(),
+            | Node::F2(_, a, b)
+            | Node::ExtF2(_, a, b) => a.cse_slots().max(b.cse_slots()),
             Node::Num(_) | Node::Var(_) => 0,
         }
     }
@@ -402,7 +419,7 @@ impl Node {
     /// # Examples
     /// ```
     /// # use hypervox_expr::Node;
-    /// let mut node = Node::Mul(
+    /// let mut node: Node = Node::Mul(
     ///     Box::new(Node::Add(Box::new(Node::Var(0)), Box::new(Node::Num(1.0)))),
     ///     Box::new(Node::Add(Box::new(Node::Var(0)), Box::new(Node::Num(1.0)))),
     /// );
@@ -475,10 +492,10 @@ impl Node {
     /// Single-pass: find one repeated subtree, extract into Let.
     fn cse_one_pass(&mut self, slot: usize) -> bool {
         let pattern = {
-            let mut nodes: Vec<&Node> = Vec::new();
-            Self::cse_collect_extractable_candidates(self, &mut nodes);
+            let mut nodes: Vec<&Node<EF1, EF2>> = Vec::new();
+            self.cse_collect_extractable_candidates(&mut nodes);
 
-            let mut found = None::<Node>;
+            let mut found = None::<Node<EF1, EF2>>;
             'outer: for i in 0..nodes.len() {
                 for j in (i + 1)..nodes.len() {
                     if *nodes[i] == *nodes[j] {
@@ -505,21 +522,24 @@ impl Node {
     /// Collects AST nodes that can be safely extracted into a CSE `Let` binding.
     ///
     /// Returns an `IndexSet` of unbound `CseRef` slots this node depends on.
-    fn cse_collect_extractable_candidates<'a>(node: &'a Node, out: &mut Vec<&'a Node>) -> IndexSet {
-        match node {
+    fn cse_collect_extractable_candidates<'a>(
+        &'a self,
+        out: &mut Vec<&'a Node<EF1, EF2>>,
+    ) -> IndexSet {
+        match self {
             Node::CseRef(slot, _) => IndexSet::singleton(*slot),
             Node::Let(slot, expr, body) => {
-                let sa = Self::cse_collect_extractable_candidates(expr, out);
-                let sb = Self::cse_collect_extractable_candidates(body, out);
+                let sa = expr.cse_collect_extractable_candidates(out);
+                let sb = body.cse_collect_extractable_candidates(out);
                 let mut s = sa | sb;
                 s.insert(*slot, false);
                 s
             }
             Node::Num(_) | Node::Var(_) => IndexSet::default(),
-            Node::Neg(a) | Node::F1(_, a) => {
-                let s = Self::cse_collect_extractable_candidates(a, out);
+            Node::Neg(a) | Node::F1(_, a) | Node::ExtF1(_, a) => {
+                let s = a.cse_collect_extractable_candidates(out);
                 if s.is_empty() {
-                    out.push(node);
+                    out.push(self);
                 }
                 s
             }
@@ -529,37 +549,38 @@ impl Node {
             | Node::Div(a, b)
             | Node::Pow(a, b)
             | Node::Mod(a, b)
-            | Node::F2(_, a, b) => {
-                let sa = Self::cse_collect_extractable_candidates(a, out);
-                let sb = Self::cse_collect_extractable_candidates(b, out);
+            | Node::F2(_, a, b)
+            | Node::ExtF2(_, a, b) => {
+                let sa = a.cse_collect_extractable_candidates(out);
+                let sb = b.cse_collect_extractable_candidates(out);
                 let s = sa | sb;
                 if s.is_empty() {
-                    out.push(node);
+                    out.push(self);
                 }
                 s
             }
         }
     }
 
-    fn cse_replace_all(&mut self, pattern: &Node, slot: usize) {
+    fn cse_replace_all(&mut self, pattern: &Node<EF1, EF2>, slot: usize) {
         if *self == *pattern {
             *self = Node::CseRef(slot, pattern.depends_on());
             return;
         }
         match self {
             Node::Num(_) | Node::Var(_) | Node::CseRef(_, _) => {}
-            Node::Neg(a) => a.cse_replace_all(pattern, slot),
+            Node::Neg(a) | Node::F1(_, a) | Node::ExtF1(_, a) => a.cse_replace_all(pattern, slot),
             Node::Add(a, b)
             | Node::Sub(a, b)
             | Node::Mul(a, b)
             | Node::Div(a, b)
             | Node::Pow(a, b)
             | Node::Mod(a, b)
-            | Node::F2(_, a, b) => {
+            | Node::F2(_, a, b)
+            | Node::ExtF2(_, a, b) => {
                 a.cse_replace_all(pattern, slot);
                 b.cse_replace_all(pattern, slot);
             }
-            Node::F1(_, a) => a.cse_replace_all(pattern, slot),
             Node::Let(_, expr, body) => {
                 expr.cse_replace_all(pattern, slot);
                 body.cse_replace_all(pattern, slot);
@@ -572,7 +593,7 @@ impl Node {
     /// # Examples
     /// ```
     /// # use hypervox_expr::Node;
-    /// let node = Node::Add(Box::new(Node::Var(0)), Box::new(Node::Var(2)));
+    /// let node: Node = Node::Add(Box::new(Node::Var(0)), Box::new(Node::Var(2)));
     /// let deps = node.depends_on();
     /// assert!(deps.contains(0));
     /// assert!(!deps.contains(1));
@@ -582,14 +603,15 @@ impl Node {
         match self {
             Node::Num(_) => IndexSet::default(),
             Node::Var(i) => IndexSet::singleton(*i),
-            Node::Neg(a) | Node::F1(_, a) => a.depends_on(),
+            Node::Neg(a) | Node::F1(_, a) | Node::ExtF1(_, a) => a.depends_on(),
             Node::Add(a, b)
             | Node::Sub(a, b)
             | Node::Mul(a, b)
             | Node::Div(a, b)
             | Node::Pow(a, b)
             | Node::Mod(a, b)
-            | Node::F2(_, a, b) => a.depends_on() | b.depends_on(),
+            | Node::F2(_, a, b)
+            | Node::ExtF2(_, a, b) => a.depends_on() | b.depends_on(),
             Node::Let(_, expr, body) => expr.depends_on() | body.depends_on(),
             Node::CseRef(_, deps) => deps.clone(),
         }
@@ -600,7 +622,7 @@ impl Node {
     /// # Examples
     /// ```
     /// # use hypervox_expr::Node;
-    /// let node = Node::Add(Box::new(Node::Num(3.0)), Box::new(Node::Num(4.0)));
+    /// let node: Node = Node::Add(Box::new(Node::Num(3.0)), Box::new(Node::Num(4.0)));
     /// let f = node.compile();
     /// assert_eq!(f(&[], &mut []), 7.0);
     /// ```
@@ -710,6 +732,17 @@ impl Node {
                 let b_fn = b.compile();
                 Box::new(move |vars: &[f64], cse: &mut [f64]| f(a_fn(vars, cse), b_fn(vars, cse)))
             }
+            Node::ExtF1(f, a) => {
+                let f = f.to_fn();
+                let a_fn = a.compile();
+                Box::new(move |vars: &[f64], cse: &mut [f64]| f(a_fn(vars, cse)))
+            }
+            Node::ExtF2(f, a, b) => {
+                let f = f.to_fn();
+                let a_fn = a.compile();
+                let b_fn = b.compile();
+                Box::new(move |vars: &[f64], cse: &mut [f64]| f(a_fn(vars, cse), b_fn(vars, cse)))
+            }
             Node::Let(slot, expr, body) => {
                 let slot = *slot;
                 let expr_fn = expr.compile();
@@ -735,7 +768,7 @@ impl Node {
         invariant_mask: &IndexSet,
         slot: &mut usize,
     ) -> Option<CompiledExpr> {
-        let mut pieces: Vec<(usize, Node)> = Vec::new();
+        let mut pieces: Vec<(usize, Node<EF1, EF2>)> = Vec::new();
 
         self.collect_invariants(invariant_mask, slot, &mut pieces);
 
@@ -755,7 +788,7 @@ impl Node {
         &mut self,
         invariant_mask: &IndexSet,
         slot: &mut usize,
-        pieces: &mut Vec<(usize, Node)>,
+        pieces: &mut Vec<(usize, Node<EF1, EF2>)>,
     ) {
         let deps = self.depends_on();
         if deps.is_disjoint(invariant_mask)
@@ -767,14 +800,17 @@ impl Node {
         } else {
             match self {
                 Node::Num(_) | Node::Var(_) | Node::CseRef(_, _) => {}
-                Node::Neg(a) | Node::F1(_, a) => a.collect_invariants(invariant_mask, slot, pieces),
+                Node::Neg(a) | Node::F1(_, a) | Node::ExtF1(_, a) => {
+                    a.collect_invariants(invariant_mask, slot, pieces)
+                }
                 Node::Add(a, b)
                 | Node::Sub(a, b)
                 | Node::Mul(a, b)
                 | Node::Div(a, b)
                 | Node::Pow(a, b)
                 | Node::Mod(a, b)
-                | Node::F2(_, a, b) => {
+                | Node::F2(_, a, b)
+                | Node::ExtF2(_, a, b) => {
                     a.collect_invariants(invariant_mask, slot, pieces);
                     b.collect_invariants(invariant_mask, slot, pieces);
                 }
@@ -820,14 +856,15 @@ impl Node {
         } else {
             match self {
                 Node::Num(_) | Node::Var(_) | Node::CseRef(_, _) => {}
-                Node::Neg(a) | Node::F1(_, a) => a.fold_cse_aliases(),
+                Node::Neg(a) | Node::F1(_, a) | Node::ExtF1(_, a) => a.fold_cse_aliases(),
                 Node::Add(a, b)
                 | Node::Sub(a, b)
                 | Node::Mul(a, b)
                 | Node::Div(a, b)
                 | Node::Pow(a, b)
                 | Node::Mod(a, b)
-                | Node::F2(_, a, b) => {
+                | Node::F2(_, a, b)
+                | Node::ExtF2(_, a, b) => {
                     a.fold_cse_aliases();
                     b.fold_cse_aliases();
                 }
@@ -843,14 +880,17 @@ impl Node {
         match self {
             Node::CseRef(slot, _) if *slot == old_slot => *slot = new_slot,
             Node::Num(_) | Node::Var(_) | Node::CseRef(_, _) => {}
-            Node::Neg(a) | Node::F1(_, a) => a.remap_cse_slot(old_slot, new_slot),
+            Node::Neg(a) | Node::F1(_, a) | Node::ExtF1(_, a) => {
+                a.remap_cse_slot(old_slot, new_slot)
+            }
             Node::Add(a, b)
             | Node::Sub(a, b)
             | Node::Mul(a, b)
             | Node::Div(a, b)
             | Node::Pow(a, b)
             | Node::Mod(a, b)
-            | Node::F2(_, a, b) => {
+            | Node::F2(_, a, b)
+            | Node::ExtF2(_, a, b) => {
                 a.remap_cse_slot(old_slot, new_slot);
                 b.remap_cse_slot(old_slot, new_slot);
             }

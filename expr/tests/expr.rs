@@ -400,7 +400,7 @@ fn test_cse_no_duplicates() {
 
 #[test]
 fn test_let_chain_order() {
-    let pieces = vec![
+    let pieces: Vec<(usize, Node)> = vec![
         (
             1usize,
             Node::Mul(Box::new(Node::Var(2)), Box::new(Node::Var(2))),
