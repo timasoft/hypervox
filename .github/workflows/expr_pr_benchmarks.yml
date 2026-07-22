@@ -4,7 +4,9 @@ on:
   pull_request:
     types: [opened, reopened, edited, synchronize]
     paths:
-      - 'expr/**'
+      - 'expr/src/**'
+      - 'expr/benches/**'
+      - 'expr/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
   workflow_dispatch:

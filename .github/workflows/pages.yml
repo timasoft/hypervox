@@ -6,7 +6,8 @@ on:
     paths:
       - '**/*.rs'
       - 'src/**'
-      - 'expr/**'
+      - 'expr/src/**'
+      - 'expr/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Trunk.toml'
