@@ -67,6 +67,46 @@ let (f, slots) = node.prepare(&[]);
 assert_eq!(f(&[3.0], &mut vec![0.0; slots]), 27.0);
 ```
 
+## Performance
+
+The `compile` strategy emits a single flat closure; `compile_multi` hoists
+dimension-invariant sub-expressions into pre-computed groups, trading longer
+compile time for faster evaluation on large grids:
+
+| Benchmark  | Parse   | Pre-eval | Compile | Compile multi | CSE     | Prepare | Prepare multi |
+|------------|---------|----------|---------|---------------|---------|---------|---------------|
+| simple     |  0.53µs | 0.03µs   |  0.13µs |   0.80µs      |  0.05µs |  0.24µs |   0.90µs      |
+| medium     |  1.63µs | 0.15µs   |  0.60µs |   2.30µs      |  0.40µs |  1.21µs |   2.97µs      |
+| heavy      |  3.14µs | 0.24µs   |  1.21µs |   4.86µs      |  1.57µs |  3.07µs |   7.00µs      |
+| repeated   |  2.16µs | 0.14µs   |  0.72µs |   2.99µs      |  1.14µs |  2.09µs |   4.06µs      |
+| very_heavy | 34.96µs | 2.76µs   | 15.51µs | 132.13µs      | 55.62µs | 75.54µs | 244.33µs      |
+
+Runtime evaluation on a 128^3 grid comparing compilation strategies:
+
+| Benchmark  | direct  | flat      | cse       | multi     |
+|------------|---------|-----------|-----------|-----------|
+| simple     |   9.2ms |    19.3ms |    19.3ms |    13.4ms |
+| medium     |  54.2ms |   103.1ms |   102.6ms |    66.1ms |
+| heavy      | 120.1ms |   239.1ms |   241.6ms |   170.1ms |
+| repeated   |  31.6ms |   111.7ms |   100.5ms |    86.0ms |
+| very_heavy | 753.5ms | 3,242.6ms | 2,274.7ms | 1,885.3ms |
+
+vs [`evalexpr`](https://crates.io/crates/evalexpr) on a 64^3 grid:
+
+| Benchmark  | hypervox_expr | evalexpr  | speedup  |
+|------------|---------------|-----------|----------|
+| simple     |   2.4ms       |   104.7ms | **~44×** |
+| medium     |  12.9ms       |   295.4ms | **~23×** |
+| heavy      |  30.4ms       |   598.5ms | **~20×** |
+| repeated   |  12.2ms       |   385.5ms | **~32×** |
+| very_heavy | 293.2ms       | 6,446.4ms | **~22×** |
+
+Measurements from [`criterion`] benchmarks on GitHub Actions
+(ubuntu-latest) at commit `e854400d`. [View live dashboard][bencher]
+
+[`criterion`]: https://github.com/criterion-rs/criterion.rs
+[bencher]: https://bencher.dev/perf/hypervox-expr
+
 ## Cargo features
 
 - `slow-benches` -- enables comparison with `evalexpr` in benchmarks (disabled by default)
