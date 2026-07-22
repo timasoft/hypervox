@@ -1,4 +1,4 @@
-name: Pull Request Benchmark
+name: hypervox_expr Pull Request Benchmark
 
 on:
   pull_request:
@@ -7,7 +7,7 @@ on:
       - 'expr/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-    workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
   benchmark_pr_branch:

@@ -1,4 +1,4 @@
-name: Base Branch Benchmark
+name: hypervox_expr Base Branch Benchmark
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
       - 'expr/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-    workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
   benchmark_base_branch:

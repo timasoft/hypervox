@@ -1,4 +1,4 @@
-name: Archive Closed Pull Request Benchmark Branch
+name: hypervox_expr Archive Closed Pull Request Benchmark Branch
 
 on:
   pull_request:
@@ -7,7 +7,7 @@ on:
       - 'expr/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-    workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
   archive_pr_branch:
