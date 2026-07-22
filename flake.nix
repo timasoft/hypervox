@@ -172,7 +172,7 @@ EOF
         };
 
         shellHook = ''
-          if [ -z "$FISH_VERSION" ] && [ -z "$NO_AUTO_FISH" ]; then
+          if [ -z "$FISH_VERSION" ] && [ -z "$NO_AUTO_FISH" ] && [ -t 0 ]; then
             exec ${pkgs.fish}/bin/fish
           fi
         '';
