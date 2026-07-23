@@ -116,7 +116,7 @@ pub fn generate_voxel_grid(
     let node_dim_sq = node_dim * node_dim;
     let size_sq = size * size;
 
-    let mut sign_grid = vec![0i8; node_dim * node_dim_sq];
+    let mut sign_grid = vec![false; node_dim * node_dim_sq];
     let mut voxel_grid = vec![0u32; size * size_sq];
 
     let step = (world_half_extent * 2.0) / size as f64;
@@ -185,16 +185,8 @@ pub fn generate_voxel_grid(
 }
 
 #[inline]
-fn eval_sign(val: f64) -> i8 {
-    if !val.is_finite() {
-        0
-    } else if val > 0.0 {
-        1
-    } else if val < 0.0 {
-        -1
-    } else {
-        0
-    }
+fn eval_sign(val: f64) -> bool {
+    !val.is_finite() || val >= 0.0
 }
 
 #[inline]
@@ -214,7 +206,7 @@ fn init_fixed_vars(dim: &DimConfig) -> [f64; MAX_NDIM] {
 }
 
 fn compute_sign_grid(
-    sign_grid: &mut [i8],
+    sign_grid: &mut [bool],
     expr: &hypervox_expr::Node,
     node_dim: usize,
     node_dim_sq: usize,
@@ -264,7 +256,7 @@ fn compute_sign_grid(
 }
 
 fn compute_sign_grid_par(
-    sign_grid: &mut [i8],
+    sign_grid: &mut [bool],
     expr: &hypervox_expr::Node,
     node_dim: usize,
     node_dim_sq: usize,
@@ -348,9 +340,32 @@ fn compute_sign_grid_par(
         });
 }
 
+#[inline]
+#[expect(clippy::too_many_arguments)]
+fn should_fill_voxel(
+    s000: bool,
+    s100: bool,
+    s010: bool,
+    s110: bool,
+    s001: bool,
+    s101: bool,
+    s011: bool,
+    s111: bool,
+) -> bool {
+    let sum = s000 as u8
+        + s100 as u8
+        + s010 as u8
+        + s110 as u8
+        + s001 as u8
+        + s101 as u8
+        + s011 as u8
+        + s111 as u8;
+    sum != 8 && sum != 0
+}
+
 fn fill_voxels(
     voxel_grid: &mut [u32],
-    sign_grid: &[i8],
+    sign_grid: &[bool],
     size: usize,
     node_dim: usize,
     node_dim_sq: usize,
@@ -378,24 +393,7 @@ fn fill_voxels(
                 let s011 = sign_grid[base + node_dim_sq + node_dim];
                 let s111 = sign_grid[base + node_dim_sq + node_dim + 1];
 
-                let has_pos = s000 >= 0
-                    || s100 >= 0
-                    || s010 >= 0
-                    || s110 >= 0
-                    || s001 >= 0
-                    || s101 >= 0
-                    || s011 >= 0
-                    || s111 >= 0;
-                let has_neg = s000 < 0
-                    || s100 < 0
-                    || s010 < 0
-                    || s110 < 0
-                    || s001 < 0
-                    || s101 < 0
-                    || s011 < 0
-                    || s111 < 0;
-
-                if has_pos && has_neg {
+                if should_fill_voxel(s000, s100, s010, s110, s001, s101, s011, s111) {
                     voxel_grid[voxel_base_y + vx] = packed_color;
                     count += 1;
                 }
@@ -407,7 +405,7 @@ fn fill_voxels(
 
 fn fill_voxels_par(
     voxel_grid: &mut [u32],
-    sign_grid: &[i8],
+    sign_grid: &[bool],
     size: usize,
     node_dim: usize,
     node_dim_sq: usize,
@@ -440,24 +438,7 @@ fn fill_voxels_par(
                 let s011 = sign_grid[base + node_dim_sq + node_dim];
                 let s111 = sign_grid[base + node_dim_sq + node_dim + 1];
 
-                let has_pos = s000 >= 0
-                    || s100 >= 0
-                    || s010 >= 0
-                    || s110 >= 0
-                    || s001 >= 0
-                    || s101 >= 0
-                    || s011 >= 0
-                    || s111 >= 0;
-                let has_neg = s000 < 0
-                    || s100 < 0
-                    || s010 < 0
-                    || s110 < 0
-                    || s001 < 0
-                    || s101 < 0
-                    || s011 < 0
-                    || s111 < 0;
-
-                if has_pos && has_neg {
+                if should_fill_voxel(s000, s100, s010, s110, s001, s101, s011, s111) {
                     *cell = packed_color;
                     local += 1;
                 }
