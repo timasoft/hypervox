@@ -39,7 +39,6 @@ pub fn generate_voxels(
 
     for (idx, entry) in expr_config.entries.iter().enumerate() {
         if !entry.enabled {
-            grids.push(vec![0; size_usize.pow(3)]);
             continue;
         }
 
@@ -50,7 +49,6 @@ pub fn generate_voxels(
             expr_status
                 .errors
                 .push(format!("Expression #{} '{}': {}", idx + 1, entry.expr, e));
-            grids.push(vec![0; size_usize.pow(3)]);
             continue;
         }
         timings.parse_ms += parse_start.elapsed().as_secs_f64() * 1000.0;
@@ -88,13 +86,14 @@ pub fn generate_voxels(
                     entry.expr,
                     e
                 ));
-                grids.push(vec![0; size_usize.pow(3)]);
             }
         }
     }
 
     let total_positions = size_usize.pow(3);
-    let (composite, rendered_voxel_count) = if grids.len() == 1
+    let (composite, rendered_voxel_count) = if grids.is_empty() {
+        (vec![0u32; total_positions], 0)
+    } else if grids.len() == 1
         && let Some(grid) = grids.pop()
     {
         (grid, last_voxel_count)
