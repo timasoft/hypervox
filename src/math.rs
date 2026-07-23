@@ -174,7 +174,14 @@ pub fn generate_voxel_grid(
 
     let voxel_fill_ms = fill_start.elapsed().as_secs_f64() * 1000.0;
 
-    Ok((voxel_grid, GridTimings { sign_grid_ms, voxel_fill_ms }, voxel_count))
+    Ok((
+        voxel_grid,
+        GridTimings {
+            sign_grid_ms,
+            voxel_fill_ms,
+        },
+        voxel_count,
+    ))
 }
 
 #[inline]
