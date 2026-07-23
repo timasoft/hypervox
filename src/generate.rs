@@ -35,6 +35,7 @@ pub fn generate_voxels(
     expr_status.errors.clear();
 
     let mut grids = Vec::with_capacity(expr_config.entries.len());
+    let mut last_voxel_count = 0;
 
     for (idx, entry) in expr_config.entries.iter().enumerate() {
         if !entry.enabled {
@@ -66,9 +67,10 @@ pub fn generate_voxels(
             &DimConfig::from(dim_mapping),
             parallel_available(),
         ) {
-            Ok((grid, grid_timings)) => {
+            Ok((grid, grid_timings, voxel_count)) => {
                 timings.sign_grid_ms += grid_timings.sign_grid_ms;
                 timings.voxel_fill_ms += grid_timings.voxel_fill_ms;
+                last_voxel_count = voxel_count;
                 grids.push(grid);
             }
             Err(e) => {
@@ -92,18 +94,25 @@ pub fn generate_voxels(
     }
 
     let total_positions = size_usize.pow(3);
-    let mut composite = vec![0u32; total_positions];
-    let mut rendered_voxel_count = 0;
-    for idx in 0..total_positions {
-        for grid in &grids {
-            let val = grid[idx];
-            if val != 0 {
-                composite[idx] = val;
-                rendered_voxel_count += 1;
-                break;
+    let (composite, rendered_voxel_count) = if grids.len() == 1
+        && let Some(grid) = grids.pop()
+    {
+        (grid, last_voxel_count)
+    } else {
+        let mut composite = vec![0u32; total_positions];
+        let mut rendered_voxel_count = 0;
+        for idx in 0..total_positions {
+            for grid in &grids {
+                let val = grid[idx];
+                if val != 0 {
+                    composite[idx] = val;
+                    rendered_voxel_count += 1;
+                    break;
+                }
             }
         }
-    }
+        (composite, rendered_voxel_count)
+    };
 
     // Only mark as valid if no errors occurred AND at least one enabled expression exists
     if expr_status.errors.is_empty()

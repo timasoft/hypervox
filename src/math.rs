@@ -98,9 +98,9 @@ pub fn generate_voxel_grid(
     world_half_extent: f64,
     dim: &DimConfig,
     use_parallel: bool,
-) -> Result<(Vec<u32>, GridTimings), String> {
+) -> Result<(Vec<u32>, GridTimings, usize), String> {
     if size == 0 {
-        return Ok((Vec::new(), GridTimings::default()));
+        return Ok((Vec::new(), GridTimings::default(), 0));
     }
 
     if dim.x_dim >= dim.ndim || dim.y_dim >= dim.ndim || dim.z_dim >= dim.ndim {
@@ -150,7 +150,7 @@ pub fn generate_voxel_grid(
 
     let fill_start = Instant::now();
 
-    if use_parallel {
+    let voxel_count = if use_parallel {
         fill_voxels_par(
             &mut voxel_grid,
             &sign_grid,
@@ -159,7 +159,7 @@ pub fn generate_voxel_grid(
             node_dim_sq,
             size_sq,
             packed_color,
-        );
+        )
     } else {
         fill_voxels(
             &mut voxel_grid,
@@ -169,18 +169,12 @@ pub fn generate_voxel_grid(
             node_dim_sq,
             size_sq,
             packed_color,
-        );
-    }
+        )
+    };
 
     let voxel_fill_ms = fill_start.elapsed().as_secs_f64() * 1000.0;
 
-    Ok((
-        voxel_grid,
-        GridTimings {
-            sign_grid_ms,
-            voxel_fill_ms,
-        },
-    ))
+    Ok((voxel_grid, GridTimings { sign_grid_ms, voxel_fill_ms }, voxel_count))
 }
 
 #[inline]
@@ -355,7 +349,8 @@ fn fill_voxels(
     node_dim_sq: usize,
     size_sq: usize,
     packed_color: u32,
-) {
+) -> usize {
+    let mut count = 0;
     for vz in 0..size {
         let base_z = vz * node_dim_sq;
         let voxel_base_z = vz * size_sq;
@@ -395,10 +390,12 @@ fn fill_voxels(
 
                 if has_pos && has_neg {
                     voxel_grid[voxel_base_y + vx] = packed_color;
+                    count += 1;
                 }
             }
         }
     }
+    count
 }
 
 fn fill_voxels_par(
@@ -409,7 +406,7 @@ fn fill_voxels_par(
     node_dim_sq: usize,
     size_sq: usize,
     packed_color: u32,
-) {
+) -> usize {
     let total_voxels = size * size_sq;
     let num_threads = rayon::current_num_threads();
     let chunk_size = total_voxels.div_ceil(num_threads);
@@ -417,11 +414,12 @@ fn fill_voxels_par(
     voxel_grid
         .par_chunks_mut(chunk_size)
         .enumerate()
-        .for_each(|(chunk_idx, chunk)| {
+        .map(|(chunk_idx, chunk)| {
             let start_linear = chunk_idx * chunk_size;
             let mut vz = start_linear / size_sq;
             let mut vy = (start_linear % size_sq) / size;
             let mut vx = start_linear % size;
+            let mut local = 0usize;
 
             for cell in chunk.iter_mut() {
                 let base = vx + vy * node_dim + vz * node_dim_sq;
@@ -454,6 +452,7 @@ fn fill_voxels_par(
 
                 if has_pos && has_neg {
                     *cell = packed_color;
+                    local += 1;
                 }
 
                 vx += 1;
@@ -466,7 +465,10 @@ fn fill_voxels_par(
                     }
                 }
             }
-        });
+
+            local
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -476,7 +478,7 @@ mod tests {
     #[test]
     fn test_sphere_generation() {
         let dim = DimConfig::default();
-        let (grid, _) =
+        let (grid, ..) =
             generate_voxel_grid(32, "x^2 + y^2 + z^2 - 4", 0xFF0000, 5.0, &dim, true).unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
         assert!(filled > 0 && filled < grid.len());
@@ -485,7 +487,7 @@ mod tests {
     #[test]
     fn test_sinusoidal_surface() {
         let dim = DimConfig::default();
-        let (grid, _) =
+        let (grid, ..) =
             generate_voxel_grid(16, "sin(x) + cos(y) + z", 0x00FF00, 8.0, &dim, true).unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
         assert!(filled > 0 && filled < grid.len());
@@ -501,7 +503,7 @@ mod tests {
             fixed: vec![0.0, 0.0, 0.0, 0.0],
             ..DimConfig::default()
         };
-        let (grid, _) =
+        let (grid, ..) =
             generate_voxel_grid(16, "x1^2 + x2^2 + x3^2 - x0^2", 0x00FF00, 8.0, &dim, true)
                 .unwrap();
         let filled = grid.iter().filter(|&&v| v != 0).count();
