@@ -28,6 +28,14 @@ pub enum Node<EF1: ExtF1 = NoExtF, EF2: ExtF2 = NoExtF> {
     CseRef(usize, IndexSet),
 }
 
+/// Leaf-inlined child classification
+enum InlinedChild {
+    Num(f64),
+    Var(usize),
+    Cse(usize),
+    Compound(CompiledExpr),
+}
+
 /// A group of dimension-invariant sub-expressions at a given nesting level.
 pub struct InvariantGroup {
     /// Nesting level: higher = more invariant (evaluated sooner).
@@ -619,6 +627,9 @@ impl<EF1: ExtF1, EF2: ExtF2> Node<EF1, EF2> {
 
     /// Compile the AST into a closure for repeated evaluation.
     ///
+    /// Leaf nodes (Var, Num, CseRef) are inlined directly into the parent closure
+    /// body, eliminating sub-closure vtbl dispatch for the most common case.
+    ///
     /// # Examples
     /// ```
     /// # use hypervox_expr::Node;
@@ -636,113 +647,40 @@ impl<EF1: ExtF1, EF2: ExtF2> Node<EF1, EF2> {
                 let i = *i;
                 Box::new(move |vars: &[f64], _| vars[i])
             }
-            Node::Neg(a) => {
-                if let Node::Mul(x, y) = a.as_ref() {
-                    let x_fn = x.compile();
-                    let y_fn = y.compile();
-                    Box::new(move |vars: &[f64], cse: &mut [f64]| {
-                        -(x_fn(vars, cse) * y_fn(vars, cse))
-                    })
-                } else {
-                    let a_fn = a.compile();
-                    Box::new(move |vars: &[f64], cse: &mut [f64]| -a_fn(vars, cse))
-                }
-            }
+            Node::Neg(a) => a.compile_unop(|x| -x),
             Node::Add(a, b) => {
-                if let (Node::Mul(x, y), _) = (a.as_ref(), b.as_ref()) {
-                    let x_fn = x.compile();
-                    let y_fn = y.compile();
-                    let c_fn = b.compile();
-                    Box::new(move |vars: &[f64], cse: &mut [f64]| {
-                        x_fn(vars, cse).mul_add(y_fn(vars, cse), c_fn(vars, cse))
-                    })
-                } else if let (_, Node::Mul(x, y)) = (a.as_ref(), b.as_ref()) {
-                    let c_fn = a.compile();
-                    let x_fn = x.compile();
-                    let y_fn = y.compile();
-                    Box::new(move |vars: &[f64], cse: &mut [f64]| {
-                        x_fn(vars, cse).mul_add(y_fn(vars, cse), c_fn(vars, cse))
-                    })
+                if let (Node::Mul(a, b), c) | (c, Node::Mul(b, a)) = (a.as_ref(), b.as_ref()) {
+                    a.compile_terop(b, c, |x, y, z| x.mul_add(y, z))
                 } else {
-                    let a_fn = a.compile();
-                    let b_fn = b.compile();
-                    Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) + b_fn(vars, cse))
+                    a.compile_binop(b, |x, y| x + y)
                 }
             }
             Node::Sub(a, b) => {
-                if let (Node::Mul(x, y), _) = (a.as_ref(), b.as_ref()) {
-                    let x_fn = x.compile();
-                    let y_fn = y.compile();
-                    let c_fn = b.compile();
-                    Box::new(move |vars: &[f64], cse: &mut [f64]| {
-                        x_fn(vars, cse).mul_add(y_fn(vars, cse), -c_fn(vars, cse))
-                    })
-                } else if let (_, Node::Mul(x, y)) = (a.as_ref(), b.as_ref()) {
-                    let c_fn = a.compile();
-                    let x_fn = x.compile();
-                    let y_fn = y.compile();
-                    Box::new(move |vars: &[f64], cse: &mut [f64]| {
-                        x_fn(vars, cse).mul_add(-y_fn(vars, cse), c_fn(vars, cse))
-                    })
+                if let (Node::Mul(a, b), c) = (a.as_ref(), b.as_ref()) {
+                    a.compile_terop(b, c, |x, y, z| x.mul_add(y, -z))
+                } else if let (c, Node::Mul(b, a)) = (a.as_ref(), b.as_ref()) {
+                    a.compile_terop(b, c, |x, y, z| x.mul_add(-y, z))
                 } else {
-                    let a_fn = a.compile();
-                    let b_fn = b.compile();
-                    Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) - b_fn(vars, cse))
+                    a.compile_binop(b, |x, y| x - y)
                 }
             }
-            Node::Mul(a, b) => {
-                let a_fn = a.compile();
-                let b_fn = b.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) * b_fn(vars, cse))
-            }
-            Node::Div(a, b) => {
-                let a_fn = a.compile();
-                let b_fn = b.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) / b_fn(vars, cse))
-            }
-            Node::Pow(a, b) => {
-                let a_fn = a.compile();
-                let b_fn = b.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| {
-                    let base = a_fn(vars, cse);
-                    let exp = b_fn(vars, cse);
-                    let exp_int = exp as i32;
-                    if base == 0.0 && exp == 0.0 {
-                        1.0
-                    } else if (exp_int as f64) == exp {
-                        base.powi(exp_int)
-                    } else {
-                        base.powf(exp)
-                    }
-                })
-            }
-            Node::Mod(a, b) => {
-                let a_fn = a.compile();
-                let b_fn = b.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| a_fn(vars, cse) % b_fn(vars, cse))
-            }
-            Node::F1(f, a) => {
-                let f = f.to_fn();
-                let a_fn = a.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| f(a_fn(vars, cse)))
-            }
-            Node::F2(f, a, b) => {
-                let f = f.to_fn();
-                let a_fn = a.compile();
-                let b_fn = b.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| f(a_fn(vars, cse), b_fn(vars, cse)))
-            }
-            Node::ExtF1(f, a) => {
-                let f = f.to_fn();
-                let a_fn = a.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| f(a_fn(vars, cse)))
-            }
-            Node::ExtF2(f, a, b) => {
-                let f = f.to_fn();
-                let a_fn = a.compile();
-                let b_fn = b.compile();
-                Box::new(move |vars: &[f64], cse: &mut [f64]| f(a_fn(vars, cse), b_fn(vars, cse)))
-            }
+            Node::Mul(a, b) => a.compile_binop(b, |x, y| x * y),
+            Node::Div(a, b) => a.compile_binop(b, |x, y| x / y),
+            Node::Mod(a, b) => a.compile_binop(b, |x, y| x % y),
+            Node::Pow(a, b) => a.compile_binop(b, |base, exp| {
+                let exp_int = exp as i32;
+                if base == 0.0 && exp == 0.0 {
+                    1.0
+                } else if (exp_int as f64) == exp {
+                    base.powi(exp_int)
+                } else {
+                    base.powf(exp)
+                }
+            }),
+            Node::F1(f, a) => a.compile_unop(f.to_fn()),
+            Node::F2(f, a, b) => a.compile_binop(b, f.to_fn()),
+            Node::ExtF1(f, a) => a.compile_unop(f.to_fn()),
+            Node::ExtF2(f, a, b) => a.compile_binop(b, f.to_fn()),
             Node::Let(slot, expr, body) => {
                 let slot = *slot;
                 let expr_fn = expr.compile();
@@ -952,5 +890,32 @@ impl<EF1: ExtF1, EF2: ExtF2> Node<EF1, EF2> {
             main,
             cse_slots,
         }
+    }
+
+    #[inline]
+    fn inlined(&self) -> InlinedChild {
+        match self {
+            Node::Num(v) => InlinedChild::Num(*v),
+            Node::Var(i) => InlinedChild::Var(*i),
+            Node::CseRef(slot, _) => InlinedChild::Cse(*slot),
+            _ => InlinedChild::Compound(self.compile()),
+        }
+    }
+
+    fn compile_unop(&self, f: fn(f64) -> f64) -> CompiledExpr {
+        include!(concat!(env!("OUT_DIR"), "/unop.rs"))
+    }
+
+    fn compile_binop(&self, b: &Node<EF1, EF2>, op: fn(f64, f64) -> f64) -> CompiledExpr {
+        include!(concat!(env!("OUT_DIR"), "/binop.rs"))
+    }
+
+    fn compile_terop(
+        &self,
+        b: &Node<EF1, EF2>,
+        c: &Node<EF1, EF2>,
+        op: fn(f64, f64, f64) -> f64,
+    ) -> CompiledExpr {
+        include!(concat!(env!("OUT_DIR"), "/terop.rs"))
     }
 }
