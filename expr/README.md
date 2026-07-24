@@ -75,34 +75,34 @@ compile time for faster evaluation on large grids:
 
 | Benchmark  | Parse   | Pre-eval | Compile | Compile multi | CSE     | Prepare | Prepare multi |
 |------------|---------|----------|---------|---------------|---------|---------|---------------|
-| simple     |  0.53µs | 0.03µs   |  0.13µs |   0.80µs      |  0.05µs |  0.24µs |   0.90µs      |
-| medium     |  1.63µs | 0.15µs   |  0.60µs |   2.30µs      |  0.40µs |  1.21µs |   2.97µs      |
-| heavy      |  3.14µs | 0.24µs   |  1.21µs |   4.86µs      |  1.57µs |  3.07µs |   7.00µs      |
-| repeated   |  2.16µs | 0.14µs   |  0.72µs |   2.99µs      |  1.14µs |  2.09µs |   4.06µs      |
-| very_heavy | 34.96µs | 2.76µs   | 15.51µs | 132.13µs      | 55.62µs | 75.54µs | 244.33µs      |
+| simple     |  0.51µs | 0.03µs   | 0.11µs  |   0.70µs      |  0.07µs |  0.22µs |   0.81µs      |
+| medium     |  1.58µs | 0.15µs   | 0.47µs  |   2.16µs      |  0.42µs |  1.15µs |   2.89µs      |
+| heavy      |  3.02µs | 0.24µs   | 1.02µs  |   4.55µs      |  1.54µs |  3.00µs |   7.38µs      |
+| repeated   |  2.05µs | 0.15µs   | 0.59µs  |   2.70µs      |  1.13µs |  1.95µs |   4.02µs      |
+| very_heavy | 33.62µs | 2.79µs   | 9.65µs  | 134.72µs      | 68.95µs | 87.15µs | 243.82µs      |
 
 Runtime evaluation on a 128^3 grid comparing compilation strategies:
 
 | Benchmark  | direct  | flat      | cse       | multi     |
 |------------|---------|-----------|-----------|-----------|
-| simple     |   9.2ms |    19.3ms |    19.3ms |    13.4ms |
-| medium     |  54.2ms |   103.1ms |   102.6ms |    66.1ms |
-| heavy      | 120.1ms |   239.1ms |   241.6ms |   170.1ms |
-| repeated   |  31.6ms |   111.7ms |   100.5ms |    86.0ms |
-| very_heavy | 753.5ms | 3,242.6ms | 2,274.7ms | 1,885.3ms |
+| simple     |   8.0ms |    11.9ms |    12.0ms |     8.4ms |
+| medium     |  52.8ms |    83.3ms |    84.2ms |    48.1ms |
+| heavy      | 122.8ms |   189.7ms |   190.7ms |   140.7ms |
+| repeated   |  35.1ms |    76.7ms |    68.0ms |    58.6ms |
+| very_heavy | 729.8ms | 2,755.1ms | 1,831.1ms | 1,562.2ms |
 
 vs [`evalexpr`](https://crates.io/crates/evalexpr) on a 64^3 grid:
 
 | Benchmark  | hypervox_expr | evalexpr  | speedup  |
 |------------|---------------|-----------|----------|
-| simple     |   2.4ms       |   104.7ms | **~44×** |
-| medium     |  12.9ms       |   295.4ms | **~23×** |
-| heavy      |  30.4ms       |   598.5ms | **~20×** |
-| repeated   |  12.2ms       |   385.5ms | **~32×** |
-| very_heavy | 293.2ms       | 6,446.4ms | **~22×** |
+| simple     |   1.5ms       |   100.4ms | **~67x** |
+| medium     |  10.4ms       |   298.7ms | **~29x** |
+| heavy      |  24.2ms       |   616.2ms | **~25x** |
+| repeated   |   8.3ms       |   384.6ms | **~46x** |
+| very_heavy | 236.2ms       | 6,800.4ms | **~29x** |
 
 Measurements from [`criterion`] benchmarks on GitHub Actions
-(ubuntu-latest) at commit `e854400d`. [View live dashboard][bencher]
+(ubuntu-latest) at commit `3fe33ad`. [View live dashboard][bencher]
 
 [`criterion`]: https://github.com/criterion-rs/criterion.rs
 [bencher]: https://bencher.dev/perf/hypervox-expr
