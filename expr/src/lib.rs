@@ -408,12 +408,12 @@ macro_rules! define_ext_f2 {
     };
 }
 
-/// Zero-variant placeholder type for when no external functions/constants are used.
+/// Placeholder type for when no external functions/constants are used.
 ///
 /// Acts as the default type parameter for [`Node`], [`parse`], and [`validate`]
 /// so that the regular API requires no generics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoExtF {}
+pub struct NoExtF(!);
 
 impl ExtF0 for NoExtF {
     fn to_num(&self) -> f64 {

@@ -1,3 +1,5 @@
+#![expect(clippy::empty_enums)]
+
 use hypervox_expr::*;
 use std::str::FromStr as _;
 
