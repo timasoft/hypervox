@@ -19,7 +19,7 @@ fma = []
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
-evalexpr = "13"
+evalexpr = "14"
 
 [[bench]]
 name = "bench_expr"

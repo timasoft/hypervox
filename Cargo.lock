@@ -2519,9 +2519,9 @@ dependencies = [
 
 [[package]]
 name = "evalexpr"
-version = "13.1.0"
+version = "14.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25929004897f2bbab309121a60400d36992f6d911d09baa6c172f6cc55706601"
+checksum = "29260bf8607ccb1de1c42ceecca968ea467a6f43e06e61c2759b4b80c580f3c9"
 
 [[package]]
 name = "event-listener"
